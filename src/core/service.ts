@@ -137,6 +137,7 @@ export class Service implements HeloApi {
         provider,
         providerLabel: PROVIDER_LABEL[provider],
         dispatch: ws.dispatchStatus(a.id, stage),
+        activityUnresolved: ws.unresolvedStages(a.id).includes(stage),
         sentFile: `${attemptDir(task.id, a.id)}/${sentFileName(stage)}`,
         outputFile: `${attemptDir(task.id, a.id)}/${outputFileName(stage)}`,
         payloadHash: disp?.payloadHash ?? null,

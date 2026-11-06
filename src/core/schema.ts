@@ -77,9 +77,16 @@ export interface DispatchRow {
   payloadHash: string;
   /** Journaled immediately before the adapter is called. */
   startedAt: string | null;
-  /** Journaled when the adapter acknowledged the request. */
+  /** Journaled when the adapter acknowledged the request. Acknowledgement is not evidence that activity stopped. */
   confirmedAt: string | null;
   dispatchId: string | null;
+  /**
+   * Journaled when the stage's activity is known to have ended: a result or
+   * error came back, the owned process confirmed exit, or Ahmed explicitly
+   * resolved it. Null means the provider may still be working.
+   */
+  endedAt: string | null;
+  endEvidence: 'result' | 'stopped' | 'resolved' | null;
 }
 
 export interface ArtifactRow {

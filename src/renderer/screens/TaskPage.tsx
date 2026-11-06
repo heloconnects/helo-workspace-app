@@ -117,7 +117,8 @@ function SharingAndStart({ t }: { t: TaskView }) {
       {t.needsStopAcknowledgement && (
         <label className="check warn-box">
           <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-          An earlier dispatch is uncertain. I confirm the earlier activity has stopped. Starting again may cause duplicate billing (with real providers).
+          An earlier attempt may still have a provider stage running: it was dispatched and never confirmed stopped. I confirm the earlier activity has
+          stopped. Starting again may cause duplicate billing (with real providers).
         </label>
       )}
       <ErrorNote error={error ?? t.startBlockedReason} />
@@ -211,6 +212,12 @@ function StageCard({ s }: { s: StageView }) {
       </p>
       <p className="meta">
         <span className={`dispatch dispatch-${s.dispatch}`}>{DISPATCH_LABEL[s.dispatch]}</span>
+        {s.activityUnresolved && (
+          <>
+            {' '}
+            · <span className="dispatch dispatch-uncertain">Not confirmed stopped</span>
+          </>
+        )}
         {s.payloadHash && (
           <>
             {' '}

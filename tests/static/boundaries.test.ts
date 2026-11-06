@@ -6,7 +6,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { API_METHODS } from '../../src/shared/api.js';
-import { APP_ENTRY, CSP, isAllowedRequest, isAppUrl, resolveAppFile, webPreferences } from '../../src/main/security.js';
+import { APP_ENTRY, CSP, isAllowedRequest, isAppUrl, isTrustedSender, resolveAppFile, webPreferences } from '../../src/main/security.js';
 
 const ROOT = path.resolve(__dirname, '../..');
 
@@ -39,8 +39,13 @@ describe('source boundaries', () => {
       /['"]git['"]/,
       /['"](codex|claude)['"]\s*,\s*\[/, // argument-array invocation of a provider program
     ];
+    // One narrow exception: the smoke test's in-page probe, which calls fetch on the app's own
+    // origin to prove the CSP blocks it. Exactly one such line may exist, in main.ts only.
+    const SMOKE_PROBE = "try { await fetch('app://helo/index.html'); r.fetchBlocked = false; } catch (e) { r.fetchBlocked = true; }";
+    const mainText = read(path.join(ROOT, 'src/main/main.ts'));
+    expect(mainText.split(SMOKE_PROBE)).toHaveLength(2);
     for (const f of SRC) {
-      const text = read(f);
+      const text = read(f).split(SMOKE_PROBE).join('');
       for (const re of forbidden) expect(text, `${path.relative(ROOT, f)} matches ${re}`).not.toMatch(re);
     }
   });
@@ -137,6 +142,16 @@ describe('Electron security settings', () => {
     expect(isAppUrl('app://helo/index.html')).toBe(true);
     for (const u of ['https://example.com/', 'http://localhost:5173/', 'file:///etc/hosts', 'ws://x', 'app://evil/index.html', 'not a url']) {
       expect(isAllowedRequest(u)).toBe(false);
+    }
+  });
+
+  it('accepts IPC only from the app window\'s main frame on the app origin', () => {
+    const ok = { senderIsAppWindow: true, frameIsMainFrame: true, frameUrl: 'app://helo/index.html' };
+    expect(isTrustedSender(ok)).toBe(true);
+    expect(isTrustedSender({ ...ok, senderIsAppWindow: false })).toBe(false); // another window
+    expect(isTrustedSender({ ...ok, frameIsMainFrame: false })).toBe(false); // a subframe
+    for (const frameUrl of ['https://example.com/', 'file:///tmp/x.html', 'app://evil/index.html', 'about:blank', '', null, undefined]) {
+      expect(isTrustedSender({ ...ok, frameUrl })).toBe(false);
     }
   });
 

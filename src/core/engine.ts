@@ -329,9 +329,29 @@ export class Workspace {
     return null;
   }
 
-  /** True when an earlier attempt may still have a provider generating (dispatch uncertain). */
+  /**
+   * True when a stage of an earlier, finished attempt was dispatched and its
+   * activity was never known to end (no result, no confirmed exit, no explicit
+   * resolution). Dispatch acknowledgement alone is not evidence of stopping.
+   */
   needsStopAcknowledgement(taskId: string): boolean {
-    return this.attemptsOf(taskId).some((a) => isTerminal(a.state) && STAGES.some((s) => this.dispatchStatus(a.id, s) === 'uncertain'));
+    return this.attemptsOf(taskId).some((a) => isTerminal(a.state) && this.unresolvedStages(a.id).length > 0);
+  }
+
+  /** Stages whose dispatched activity may still be running. */
+  unresolvedStages(attemptId: string): StageName[] {
+    return this.t.dispatch.filter((d) => d.attemptId === attemptId && d.startedAt && !d.endedAt).map((d) => d.stage);
+  }
+
+  private markEnded(attemptId: string, stage: StageName | null, evidence: 'result' | 'stopped' | 'resolved', label: string): void {
+    this.db.transact(label, (d) => {
+      for (const row of d.dispatch) {
+        if (row.attemptId === attemptId && (stage === null || row.stage === stage) && row.startedAt && !row.endedAt) {
+          row.endedAt = this.now();
+          row.endEvidence = evidence;
+        }
+      }
+    });
   }
 
   startAttempt(input: { taskId: string; approvedPacketHash: string; idempotencyKey: string; acknowledgePriorStopped: boolean }): AttemptRow {
@@ -341,8 +361,16 @@ export class Workspace {
     if (input.approvedPacketHash !== task.packetHash) throw new UserError('The sharing approval does not match this task packet. Review the sharing screen again.');
     const block = this.startBlock(task.id);
     if (block) throw new UserError(block);
-    if (this.needsStopAcknowledgement(task.id) && !input.acknowledgePriorStopped) {
-      throw new UserError('An earlier dispatch is uncertain. Confirm the earlier activity has stopped before starting a new attempt (possible duplicate billing).');
+    if (this.needsStopAcknowledgement(task.id)) {
+      if (!input.acknowledgePriorStopped) {
+        throw new UserError(
+          'An earlier attempt may still have a provider stage running (it was dispatched and never confirmed stopped). Confirm the earlier activity has stopped before starting a new attempt (possible duplicate billing).',
+        );
+      }
+      // The explicit acknowledgement is the resolution: record it before anything new is dispatched.
+      for (const prior of this.attemptsOf(task.id)) {
+        if (this.unresolvedStages(prior.id).length) this.markEnded(prior.id, null, 'resolved', 'dispatch-resolved-by-acknowledgement');
+      }
     }
     const id = newId('a');
     const number = this.attemptsOf(task.id).length + 1;
@@ -430,6 +458,9 @@ export class Workspace {
    */
   private publishRecord(fs: SimFs, dir: string, attemptId: string, name: string, content: string, handle: RunHandle | null): { ok: true } | { ok: false; error: string } {
     if (handle) this.alive(handle);
+    // F2: re-check the folder path and RULES.md business line before every write.
+    const block = this.projectBlock(this.attempt(attemptId).projectId);
+    if (block) return { ok: false, error: `project blocked, nothing written: ${block}` };
     const writeId = newId('w');
     const plannedHash = sha256(content);
     this.db.transact(`intent:${name}`, (d) => {
@@ -500,6 +531,21 @@ export class Workspace {
       a.finalizing = fin;
     });
     this.changed();
+  }
+
+  /** For an already-final attempt: put back a missing final-status.json with the same bytes and outcome. */
+  private republishFinalStatus(attemptId: string): void {
+    const a = this.attempt(attemptId);
+    if (!a.finalizing) return;
+    const fs = this.cloneOf(a.projectId);
+    const dir = attemptDir(a.taskId, a.id);
+    if (fs.exists(`${dir}/${FINAL_STATUS}`)) return; // present (a mismatched copy was quarantined in step 1)
+    const res = this.publishRecord(fs, dir, a.id, FINAL_STATUS, a.finalizing.finalStatusBytes, null);
+    this.note(
+      res.ok
+        ? `Recovery: final-status.json for attempt ${a.number} was missing and was written again with the same outcome (${a.finalizing.outcome}).`
+        : `Recovery: final-status.json for attempt ${a.number} is missing and could not be written: ${res.error}.`,
+    );
   }
 
   private publishFinalStatus(attemptId: string, handle: RunHandle | null): void {
@@ -591,7 +637,17 @@ export class Workspace {
       // Dispatch journal: started (before the adapter call), confirmed (on acknowledgement).
       this.alive(handle);
       this.db.transact(`dispatch-started:${stage}`, (d) => {
-        d.dispatch.push({ attemptId: attempt.id, stage, provider, payloadHash: payload.hash, startedAt: this.now(), confirmedAt: null, dispatchId: null });
+        d.dispatch.push({
+          attemptId: attempt.id,
+          stage,
+          provider,
+          payloadHash: payload.hash,
+          startedAt: this.now(),
+          confirmedAt: null,
+          dispatchId: null,
+          endedAt: null,
+          endEvidence: null,
+        });
       });
       const controller = new AbortController();
       handle.controller = controller;
@@ -697,6 +753,7 @@ export class Workspace {
     this.alive(handle);
     if (first.kind === 'events' || first.kind === 'error') {
       handle.controller = null;
+      this.markEnded(attemptId, stage, 'result', `dispatch-ended:${stage}`);
       return first;
     }
 
@@ -725,6 +782,7 @@ export class Workspace {
     const stopped = await Promise.race([run.stopped, grace]);
     this.alive(handle);
     handle.controller = null;
+    if (stopped) this.markEnded(attemptId, stage, 'stopped', `dispatch-stopped:${stage}`);
     const a = this.attempt(attemptId);
     if (stopped) {
       if (a.cancelReason === 'timeout') this.finalize(handle, 'failed', `${stage} stage timed out after ${this.options.timing.stageTimeoutMs} ms (simulated; the plan proposes 180 s).`, null);
@@ -765,6 +823,7 @@ export class Workspace {
       a.cancelReason === 'timeout'
         ? 'Stage timed out; the owned process was later confirmed stopped by an explicit resolution.'
         : 'Cancelled; the owned process was later confirmed stopped by an explicit resolution.';
+    this.markEnded(a.id, null, 'resolved', 'dispatch-resolved-by-resolution');
     this.decideOutcome(a, a.cancelReason === 'timeout' ? 'failed' : 'cancelled', reason, null);
     this.publishFinalStatus(a.id, null);
     this.runs.delete(a.id);
@@ -817,8 +876,15 @@ export class Workspace {
     return this.recovering;
   }
 
+  /** The F2 block reason for the project that owns this clone, or null. */
+  private blockedClone(fs: SimFs): string | null {
+    const p = this.t.projects.find((x) => this.clones.get(x.folderId) === fs);
+    return p ? this.projectBlock(p.id) : null;
+  }
+
   private reconcileFiles(attemptId: string): void {
     const a = this.attempt(attemptId);
+    if (this.projectBlock(a.projectId)) return; // no writes into a blocked project; the outcome is still settled in step 2
     const fs = this.cloneOf(a.projectId);
     const dir = attemptDir(a.taskId, a.id);
     for (const row of this.t.recordFiles.filter((r) => r.attemptId === a.id && r.state === 'intended')) {
@@ -837,6 +903,13 @@ export class Workspace {
         });
       }
     }
+    // Records already published: content that no longer matches its recorded hash is moved to
+    // quarantine. The row stays "published", so the file stays required and the record state
+    // shows it as quarantined (damaged). Nothing here changes an outcome.
+    for (const row of this.t.recordFiles.filter((r) => r.attemptId === a.id && r.state === 'published')) {
+      const have = fs.hash(`${dir}/${row.name}`);
+      if (have !== undefined && have !== row.plannedHash) this.quarantine(fs, dir, row.name, row.writeId);
+    }
     for (const path of fs.list(`${dir}/.tmp-`)) {
       const name = path.slice(dir.length + 1);
       this.quarantine(fs, dir, name, name.slice('.tmp-'.length));
@@ -845,6 +918,8 @@ export class Workspace {
 
   /** F3 safe quarantine move: no-replace link to quarantine/<name>-<write-id>(-n), then remove the old name. Repeatable. */
   quarantine(fs: SimFs, dir: string, name: string, writeId: string): string {
+    // F2: a quarantine move is a write; never write into a project that is blocked.
+    if (this.blockedClone(fs)) return '';
     const src = `${dir}/${name}`;
     const content = fs.read(src);
     if (content === undefined) return '';
@@ -872,7 +947,12 @@ export class Workspace {
   /** Returns true when the attempt was marked interrupted by this call. */
   private settleOutcome(attemptId: string): boolean {
     const a = this.attempt(attemptId);
-    if (a.final) return false;
+    if (a.final) {
+      // Already final: the outcome is left alone, but a missing final-status.json is
+      // republished from the exact bytes kept when the outcome was decided.
+      this.republishFinalStatus(a.id);
+      return false;
+    }
     // (a) An outcome is already recorded: keep it and (re)publish the same final-status bytes.
     if (a.finalizing) {
       this.publishFinalStatus(a.id, null);
@@ -894,29 +974,55 @@ export class Workspace {
     return true;
   }
 
-  private tryAdopt(a: AttemptRow, text: string): boolean {
-    let parsed: { attemptId?: unknown; taskId?: unknown; outcome?: unknown; files?: unknown; reason?: unknown; completionLabel?: unknown; decidedAt?: unknown };
+  /** Rule (b) check: is this final-status.json a valid, consistent record for this attempt? Never throws. */
+  private adoptable(a: AttemptRow, text: string): { outcome: Outcome; reason: string | null; completionLabel: string | null; decidedAt: string | null } | null {
+    let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
-      return false;
+      return null;
     }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const o = parsed as Record<string, unknown>;
     const outcomes: Outcome[] = ['complete', 'needs_attention', 'failed', 'cancelled', 'interrupted'];
-    if (parsed.attemptId !== a.id || parsed.taskId !== a.taskId || !outcomes.includes(parsed.outcome as Outcome)) return false;
-    if (!Array.isArray(parsed.files)) return false;
+    if (o.attemptId !== a.id || o.taskId !== a.taskId || !outcomes.includes(o.outcome as Outcome)) return null;
+    if (!Array.isArray(o.files)) return null;
+    const listed: { name: string; sha256: string }[] = [];
+    for (const f of o.files) {
+      if (f === null || typeof f !== 'object' || Array.isArray(f)) return null;
+      const { name, sha256: hash } = f as Record<string, unknown>;
+      if (typeof name !== 'string' || typeof hash !== 'string') return null;
+      listed.push({ name, sha256: hash });
+    }
+    const outcome = o.outcome as Outcome;
+    // The listed files must be exactly the record files the database knows as published ...
     const known = this.publishedFiles(a.id);
-    const listed = parsed.files as { name: string; sha256: string }[];
     const same = listed.length === known.length && listed.every((f, i) => known[i]?.name === f.name && known[i]?.sha256 === f.sha256);
-    if (!same) return false;
-    const outcome = parsed.outcome as Outcome;
+    if (!same) return null;
+    // ... and they must be able to support the outcome (C2): never adopt "complete" without every stage.
+    if (fileListIsConsistent(outcome, listed.map((f) => f.name))) return null;
+    return {
+      outcome,
+      reason: typeof o.reason === 'string' ? o.reason : null,
+      completionLabel: typeof o.completionLabel === 'string' ? o.completionLabel : null,
+      decidedAt: typeof o.decidedAt === 'string' ? o.decidedAt : null,
+    };
+  }
+
+  private tryAdopt(a: AttemptRow, text: string): boolean {
+    const ok = this.adoptable(a, text);
+    if (!ok) return false;
+    const known = this.publishedFiles(a.id);
+    const parsed = ok;
+    const outcome = parsed.outcome;
     const fin: FinalizingRecord = {
       outcome,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : null,
-      completionLabel: typeof parsed.completionLabel === 'string' ? parsed.completionLabel : null,
+      reason: parsed.reason,
+      completionLabel: parsed.completionLabel,
       files: known,
       finalStatusBytes: text,
       finalStatusHash: sha256(text),
-      decidedAt: typeof parsed.decidedAt === 'string' ? parsed.decidedAt : this.now(),
+      decidedAt: parsed.decidedAt ?? this.now(),
     };
     this.db.transact('recovery:adopt-finalizing', (d) => {
       const row = d.attempts.find((x) => x.id === a.id)!;
@@ -936,6 +1042,8 @@ export class Workspace {
   saveOutsideReview(input: { taskId: string; source: 'chatgpt' | 'claude-app'; text: string }): OutsideSaveRow {
     const task = this.task(input.taskId);
     if (!input.text.trim()) throw new UserError('Paste the review text first.');
+    const block = this.projectBlock(task.projectId);
+    if (block) throw new UserError(`Not saved: ${block}`);
     const fs = this.cloneOf(task.projectId);
     const dir = `${taskDir(task.id)}/outside`;
     const date = this.now().slice(0, 10);
@@ -984,6 +1092,7 @@ export class Workspace {
 
   private recoverOutsideSaves(): void {
     for (const s of this.t.outsideSaves) {
+      if (this.projectBlock(s.projectId)) continue;
       const fs = this.cloneOf(s.projectId);
       const path = this.outsidePath(s);
       const have = fs.hash(path);

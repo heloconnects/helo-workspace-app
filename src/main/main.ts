@@ -10,7 +10,17 @@ import { SIMULATION_BANNER } from '../shared/types.js';
 import { UI_TIMING, Workspace } from '../core/engine.js';
 import { seedWorkspace } from '../core/seed.js';
 import { Service } from '../core/service.js';
-import { APP_ENTRY, APP_SCHEME, CSP, isAllowedRequest, isAppUrl, MAX_IPC_ARG_BYTES, resolveAppFile, webPreferences } from './security.js';
+import {
+  APP_ENTRY,
+  APP_SCHEME,
+  CSP,
+  isAllowedRequest,
+  isTrustedSender,
+  MAX_IPC_ARG_BYTES,
+  REQUIRED_LIVE_PREFERENCES,
+  resolveAppFile,
+  webPreferences,
+} from './security.js';
 
 const SMOKE = process.argv.includes('--smoke-test');
 const RENDERER_ROOT = path.join(__dirname, '..', 'renderer');
@@ -38,7 +48,11 @@ function hardenContents(contents: WebContents): void {
 
 function trustedSender(event: IpcMainInvokeEvent): boolean {
   const frame = event.senderFrame;
-  return !!mainWindow && !!frame && event.sender === mainWindow.webContents && frame === mainWindow.webContents.mainFrame && isAppUrl(frame.url);
+  return isTrustedSender({
+    senderIsAppWindow: !!mainWindow && event.sender === mainWindow.webContents,
+    frameIsMainFrame: !!mainWindow && !!frame && frame === mainWindow.webContents.mainFrame,
+    frameUrl: frame?.url,
+  });
 }
 
 function registerIpc(): void {
@@ -105,17 +119,33 @@ async function createWindow(): Promise<void> {
 async function smokeTest(): Promise<void> {
   const wc = mainWindow!.webContents;
   await new Promise((r) => setTimeout(r, 1500));
-  const report = await wc.executeJavaScript(`(() => ({
-    banner: document.body.innerText.includes(${JSON.stringify(SIMULATION_BANNER)}),
-    hasRequire: typeof require !== 'undefined',
-    hasProcess: typeof process !== 'undefined',
-    heloKeys: Object.keys(window.helo || {}).sort(),
-    projects: document.querySelectorAll('[data-testid="project-row"]').length,
-    location: location.href,
-  }))()`);
+  const windowsBefore = BrowserWindow.getAllWindows().length;
+  // Behavioural checks run inside the page. Every target is the app's own origin, so a
+  // guard that failed would still cause no network traffic.
+  const report = await wc.executeJavaScript(`(async () => {
+    const r = {
+      banner: document.body.innerText.includes(${JSON.stringify(SIMULATION_BANNER)}),
+      hasRequire: typeof require !== 'undefined',
+      hasProcess: typeof process !== 'undefined',
+      heloKeys: Object.keys(window.helo || {}).sort(),
+      projects: document.querySelectorAll('[data-testid="project-row"]').length,
+    };
+    try { r.windowOpenResult = window.open('app://helo/index.html') === null ? 'denied' : 'opened'; } catch (e) { r.windowOpenResult = 'threw'; }
+    try { eval('1'); r.evalBlocked = false; } catch (e) { r.evalBlocked = true; }
+    try { await fetch('app://helo/index.html'); r.fetchBlocked = false; } catch (e) { r.fetchBlocked = true; }
+    try { const p = await Notification.requestPermission(); r.notificationPermission = p; } catch (e) { r.notificationPermission = 'threw'; }
+    const unknown = await window.helo.getTask({ taskId: 42 });
+    r.badInputRejected = unknown && unknown.ok === false;
+    setTimeout(() => { location.href = 'app://helo/elsewhere.html'; }, 0);
+    return r;
+  })()`);
+  await new Promise((r) => setTimeout(r, 500));
   const prefs = (wc as unknown as { getLastWebPreferences?: () => Record<string, unknown> }).getLastWebPreferences?.() ?? {};
   const out = {
     ...report,
+    locationAfterNavigationAttempt: wc.getURL(),
+    windowsBefore,
+    windowsAfter: BrowserWindow.getAllWindows().length,
     contextIsolation: prefs.contextIsolation,
     sandbox: prefs.sandbox,
     nodeIntegration: prefs.nodeIntegration,
@@ -123,8 +153,25 @@ async function smokeTest(): Promise<void> {
     electron: process.versions.electron,
   };
   console.log('SMOKE ' + JSON.stringify(out));
-  const ok = out.banner && !out.hasRequire && !out.hasProcess && out.projects >= 2 && out.location === APP_ENTRY;
-  app.exit(ok ? 0 : 1);
+  const prefsOk = (Object.keys(REQUIRED_LIVE_PREFERENCES) as (keyof typeof REQUIRED_LIVE_PREFERENCES)[]).every(
+    (k) => out[k] === REQUIRED_LIVE_PREFERENCES[k],
+  );
+  const failures = [
+    !out.banner && 'banner missing',
+    out.hasRequire && 'require visible in page',
+    out.hasProcess && 'process visible in page',
+    out.projects < 2 && 'projects not shown',
+    !prefsOk && 'security preferences differ',
+    out.windowOpenResult !== 'denied' && 'window.open not denied',
+    out.windowsAfter !== out.windowsBefore && 'a new window was created',
+    !out.evalBlocked && 'eval not blocked by CSP',
+    !out.fetchBlocked && 'fetch not blocked by CSP',
+    out.notificationPermission === 'granted' && 'permission granted',
+    !out.badInputRejected && 'bad input accepted',
+    out.locationAfterNavigationAttempt !== APP_ENTRY && 'navigation not prevented',
+  ].filter(Boolean);
+  console.log(failures.length ? 'SMOKE FAILED: ' + failures.join('; ') : 'SMOKE PASSED');
+  app.exit(failures.length ? 1 : 0);
 }
 
 app.whenReady().then(async () => {

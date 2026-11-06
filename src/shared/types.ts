@@ -179,6 +179,8 @@ export interface StageView {
   provider: Provider;
   providerLabel: string;
   dispatch: DispatchStatus;
+  /** Dispatched, and never known to have stopped (no result, no confirmed exit, no explicit resolution). */
+  activityUnresolved: boolean;
   sentFile: string;
   outputFile: string;
   payloadHash: string | null;

@@ -114,7 +114,7 @@ export function computeRecordState(attempt: AttemptRow, fs: SimFs, rows: RecordF
     const want = expected.get(name);
     const have = fs.hash(path);
     if (have === undefined) {
-      if (name === FINAL_STATUS && !attempt.final) {
+      if (name === FINAL_STATUS && !quarantinedCopies(fs, dir, name).length) {
         const row = rows.find((r) => r.attemptId === attempt.id && r.name === FINAL_STATUS);
         problems.push({
           file: name,

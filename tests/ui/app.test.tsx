@@ -150,7 +150,8 @@ describe('simulated app interface', () => {
     expect(screen.getAllByTestId('record-damaged')[0]!.textContent).toMatch(/final-status file not on disk: ENOSPC/);
     await openTask('Example: interrupted (app crash after review dispatch)');
     expect(within(screen.getByTestId('stage-review')).getByText('Dispatch uncertain')).toBeTruthy();
-    expect(screen.getByText(/An earlier dispatch is uncertain/)).toBeTruthy();
+    expect(screen.getByText(/An earlier attempt may still have a provider stage running/)).toBeTruthy();
+    expect(within(screen.getByTestId('stage-review')).getByText('Not confirmed stopped')).toBeTruthy();
     await openTask('Example: cancellation unconfirmed');
     expect(screen.getAllByText(/Retry is blocked until this is resolved/).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: /Approve sharing and start new attempt/ })).toHaveProperty('disabled', true);

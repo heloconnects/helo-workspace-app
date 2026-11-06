@@ -110,7 +110,7 @@ describe.each(BOTH)('crash at every boundary (%s drafting)', (drafter) => {
     expect(ws.attempt(at.id).state).toBe('interrupted');
     // A new attempt needs an explicit acknowledgement that the old activity stopped.
     expect(ws.needsStopAcknowledgement(at.taskId)).toBe(true);
-    expect(() => start(ws, at.taskId, false)).toThrow(/uncertain/);
+    expect(() => start(ws, at.taskId, false)).toThrow(/may still have a provider stage running/);
     const second = start(ws, at.taskId, true);
     await ws.settled(second.id);
     expect(ws.attempt(second.id).state).toBe('complete');

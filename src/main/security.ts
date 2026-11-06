@@ -91,5 +91,26 @@ export function resolveAppFile(url: string, rendererRoot: string): { file: strin
   return { file, contentType };
 }
 
+/**
+ * IPC sender check: only the app window's own main frame, showing the app's
+ * own page, may call an operation. Subframes, other windows and other
+ * origins are refused.
+ */
+export function isTrustedSender(input: {
+  senderIsAppWindow: boolean;
+  frameIsMainFrame: boolean;
+  frameUrl: string | null | undefined;
+}): boolean {
+  return input.senderIsAppWindow && input.frameIsMainFrame && typeof input.frameUrl === 'string' && isAppUrl(input.frameUrl);
+}
+
+/** The security preferences the smoke test requires the live window to report. */
+export const REQUIRED_LIVE_PREFERENCES = {
+  contextIsolation: true,
+  sandbox: true,
+  nodeIntegration: false,
+  webSecurity: true,
+} as const;
+
 /** Largest serialized argument accepted from the renderer for one operation. */
 export const MAX_IPC_ARG_BYTES = 256 * 1024;
