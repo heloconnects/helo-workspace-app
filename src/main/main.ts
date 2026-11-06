@@ -166,7 +166,7 @@ async function smokeTest(): Promise<void> {
     out.windowsAfter !== out.windowsBefore && 'a new window was created',
     !out.evalBlocked && 'eval not blocked by CSP',
     !out.fetchBlocked && 'fetch not blocked by CSP',
-    out.notificationPermission === 'granted' && 'permission granted',
+    out.notificationPermission !== 'denied' && `permission request not denied (${out.notificationPermission})`,
     !out.badInputRejected && 'bad input accepted',
     out.locationAfterNavigationAttempt !== APP_ENTRY && 'navigation not prevented',
   ].filter(Boolean);

@@ -19,5 +19,5 @@ dist/renderer/index.html                   0.67 kB │ gzip:  0.39 kB
 dist/renderer/assets/index-BIJOFYP-.css    5.52 kB │ gzip:  1.80 kB
 dist/renderer/assets/index-DxYWJ3lO.js   249.05 kB │ gzip: 76.30 kB
 
-✓ built in 209ms
+✓ built in 263ms
 exit: 0

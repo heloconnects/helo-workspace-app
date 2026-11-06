@@ -560,6 +560,10 @@ export class Workspace {
         if (row) row.state = 'published';
       });
     } else {
+      // During recovery, a different file left at the final name (for example an unadoptable
+      // final-status.json that could not be quarantined while the project was blocked) is moved
+      // to quarantine first, so the recorded bytes can be published. Never during a run.
+      if (existing !== undefined && this.recovering && !this.projectBlock(a.projectId)) this.quarantine(fs, dir, FINAL_STATUS, 'mismatched');
       const res = this.publishRecord(fs, dir, a.id, FINAL_STATUS, a.finalizing.finalStatusBytes, handle);
       if (!res.ok) {
         // The outcome stays as recorded; only the record state shows the problem.
@@ -882,9 +886,16 @@ export class Workspace {
     return p ? this.projectBlock(p.id) : null;
   }
 
+  /**
+   * F3 step 1. Reading the clone and updating the database always happen, so
+   * the outcome settled in step 2 always sees every record that really was
+   * published. Only the writes into the clone (quarantine moves) are held back
+   * while the project is blocked (F2); they happen on the first start after the
+   * folder matches again.
+   */
   private reconcileFiles(attemptId: string): void {
     const a = this.attempt(attemptId);
-    if (this.projectBlock(a.projectId)) return; // no writes into a blocked project; the outcome is still settled in step 2
+    const blocked = this.projectBlock(a.projectId) !== null;
     const fs = this.cloneOf(a.projectId);
     const dir = attemptDir(a.taskId, a.id);
     for (const row of this.t.recordFiles.filter((r) => r.attemptId === a.id && r.state === 'intended')) {
@@ -894,15 +905,24 @@ export class Workspace {
         this.db.transact(`recovery:published:${row.name}`, (d) => {
           d.recordFiles.find((x) => x.attemptId === a.id && x.name === row.name)!.state = 'published';
         });
-      } else {
-        if (have !== undefined) this.quarantine(fs, dir, row.name, row.writeId);
+      } else if (have === undefined) {
         this.db.transact(`recovery:not-published:${row.name}`, (d) => {
           const x = d.recordFiles.find((y) => y.attemptId === a.id && y.name === row.name)!;
           x.state = 'not_published';
-          x.error = have === undefined ? 'missing after restart' : 'mismatched after restart; moved to quarantine';
+          x.error = 'missing after restart';
+        });
+      } else if (!blocked) {
+        this.quarantine(fs, dir, row.name, row.writeId);
+        this.db.transact(`recovery:not-published:${row.name}`, (d) => {
+          const x = d.recordFiles.find((y) => y.attemptId === a.id && y.name === row.name)!;
+          x.state = 'not_published';
+          x.error = 'mismatched after restart; moved to quarantine';
         });
       }
+      // Blocked and mismatched: the row stays "intended" (not published, so never required),
+      // and the quarantine move waits until the project is unblocked.
     }
+    if (blocked) return;
     // Records already published: content that no longer matches its recorded hash is moved to
     // quarantine. The row stays "published", so the file stays required and the record state
     // shows it as quarantined (damaged). Nothing here changes an outcome.

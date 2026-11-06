@@ -229,3 +229,81 @@ describe('finding 4 (Medium): project identity is rechecked before every write',
     expect(ws.cloneOf(a.id).list('')).toEqual([]);
   });
 });
+
+describe('re-review regression (Medium): a blocked project is still reconciled before its outcome is settled', () => {
+  it.each(BOTH)('a record published just before the crash stays required when recovery runs while blocked (%s drafting)', async (drafter) => {
+    const { ws, a } = makeWorkspace();
+    // 1. Crash after the hard link publishes 1-draft.md, before its database acknowledgement.
+    const t = makeTask(ws, a.id, drafter, { ...OK, crashAt: 'publish:1-draft.md:linked' });
+    const at = start(ws, t.id);
+    await ws.settled(at.id);
+    const fs = ws.cloneOf(a.id);
+    const dir = attemptDir(t.id, at.id);
+    const before = fs.snapshot();
+    // 2. The project becomes blocked.
+    ws.folder('folder-a').rulesBusiness = 'fictional-b';
+    // 3. Recovery decides interrupted; the frozen list includes 1-draft.md, and nothing is written.
+    ws.recover();
+    const fin = ws.attempt(at.id).finalizing!;
+    expect(fin.outcome).toBe('interrupted');
+    expect(fin.files.map((f) => f.name)).toEqual(['packet.md', 'sharing-plan.json', '1-draft-sent.json', '1-draft.md']);
+    expect(fs.snapshot()).toEqual(before);
+    expect(fs.list(`${dir}/.tmp-`)).toHaveLength(1); // the leftover waits for the unblock
+    // 4. Unblock and recover: the leftover is quarantined, final-status.json is published.
+    ws.folder('folder-a').rulesBusiness = 'fictional-a';
+    ws.recover();
+    expect(fs.list(`${dir}/.tmp-`)).toEqual([]);
+    expect(ws.attempt(at.id).final).toBe(true);
+    expect(ws.recordState(at.id)).toEqual({ kind: 'intact' });
+    // 5. Deleting that output now shows the record as damaged.
+    ws.damageRecord(at.id, '1-draft.md', 'delete');
+    const rs = ws.recordState(at.id);
+    expect(rs.kind === 'damaged' && rs.problems.map((p) => [p.file, p.kind])).toEqual([['1-draft.md', 'missing']]);
+  });
+
+  it('a mismatched intended record is never counted as published while blocked, and is quarantined after the unblock', async () => {
+    const { ws, a } = makeWorkspace();
+    const t = makeTask(ws, a.id, 'claude', { ...OK, crashAt: 'publish:2-review.md:linked' });
+    const at = start(ws, t.id);
+    await ws.settled(at.id);
+    const fs = ws.cloneOf(a.id);
+    const dir = attemptDir(t.id, at.id);
+    fs.externalWrite(`${dir}/2-review.md`, 'changed while the app was down');
+    ws.folder('folder-a').rulesBusiness = 'fictional-b';
+    ws.recover();
+    expect(ws.attempt(at.id).finalizing!.files.map((f) => f.name)).not.toContain('2-review.md');
+    expect(fs.read(`${dir}/2-review.md`)).toBe('changed while the app was down'); // not touched while blocked
+    ws.folder('folder-a').rulesBusiness = 'fictional-a';
+    ws.recover();
+    expect(fs.exists(`${dir}/2-review.md`)).toBe(false);
+    expect(fs.list(`${dir}/quarantine/`).some((p) => p.includes('/quarantine/2-review.md-'))).toBe(true);
+    expect(ws.attempt(at.id).state).toBe('interrupted');
+    expect(ws.recordState(at.id)).toEqual({ kind: 'intact' });
+  });
+
+  it('an unadoptable final-status.json left while blocked is quarantined after the unblock, and the recorded bytes are published', async () => {
+    const { ws, a } = makeWorkspace();
+    const t = makeTask(ws, a.id, 'codex');
+    const at = await runToEnd(ws, t.id);
+    ws.db.transact('test:lose-finalizing', (d) => {
+      const row = d.attempts.find((x) => x.id === at.id)!;
+      row.finalizing = null;
+      row.final = false;
+      row.state = 'drafting';
+      d.recordFiles = d.recordFiles.filter((r) => !(r.attemptId === at.id && r.name === 'final-status.json'));
+    });
+    const fs = ws.cloneOf(a.id);
+    const dir = attemptDir(t.id, at.id);
+    fs.externalDelete(`${dir}/final-status.json`);
+    fs.externalWrite(`${dir}/final-status.json`, 'null');
+    ws.folder('folder-a').rulesBusiness = 'fictional-b';
+    ws.recover();
+    expect(ws.attempt(at.id).state).toBe('interrupted');
+    expect(fs.read(`${dir}/final-status.json`)).toBe('null');
+    ws.folder('folder-a').rulesBusiness = 'fictional-a';
+    ws.recover();
+    expect(ws.attempt(at.id).final).toBe(true);
+    expect(fs.read(`${dir}/final-status.json`)).toBe(ws.attempt(at.id).finalizing!.finalStatusBytes);
+    expect(ws.recordState(at.id)).toEqual({ kind: 'intact' });
+  });
+});
