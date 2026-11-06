@@ -118,7 +118,8 @@ export class SqliteDb implements DbLike<Tables> {
     const result = fn(draft);
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      for (const t of TABLES) this.writeDiff(t, this.cache[t.name] as unknown[], draft[t.name] as unknown[]);
+      const counter = { n: 0, label };
+      for (const t of TABLES) this.writeDiff(t, this.cache[t.name] as unknown[], draft[t.name] as unknown[], counter);
       this.db.exec('COMMIT');
     } catch (e) {
       this.db.exec('ROLLBACK');
@@ -143,14 +144,30 @@ export class SqliteDb implements DbLike<Tables> {
     return m;
   }
 
-  private writeDiff(t: (typeof TABLES)[number], before: unknown[], after: unknown[]): void {
+  private writeDiff(t: (typeof TABLES)[number], before: unknown[], after: unknown[], counter: { n: number; label: string }): void {
     const a = this.keyed(t, before);
     const b = this.keyed(t, after);
-    for (const key of a.keys()) if (!b.has(key)) this.db.prepare(`DELETE FROM ${t.sql} WHERE key = ?`).run(key);
+    // A crash point after the first statement of each transaction: some rows are already
+    // changed inside the open SQL transaction, which must then roll back as a whole.
+    const step = () => {
+      counter.n += 1;
+      if (counter.n === 1) this.hooks.point(`txn:${counter.label}:mid`);
+    };
+    for (const key of a.keys()) {
+      if (!b.has(key)) {
+        this.db.prepare(`DELETE FROM ${t.sql} WHERE key = ?`).run(key);
+        step();
+      }
+    }
     for (const [key, v] of b) {
       const old = a.get(key);
-      if (!old) this.db.prepare(`INSERT INTO ${t.sql} (key, owner, data) VALUES (?, ?, ?)`).run(key, v.owner, v.json);
-      else if (old.json !== v.json) this.db.prepare(`UPDATE ${t.sql} SET data = ?, owner = ? WHERE key = ?`).run(v.json, v.owner, key);
+      if (!old) {
+        this.db.prepare(`INSERT INTO ${t.sql} (key, owner, data) VALUES (?, ?, ?)`).run(key, v.owner, v.json);
+        step();
+      } else if (old.json !== v.json) {
+        this.db.prepare(`UPDATE ${t.sql} SET data = ?, owner = ? WHERE key = ?`).run(v.json, v.owner, key);
+        step();
+      }
     }
   }
 

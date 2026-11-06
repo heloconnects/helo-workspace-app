@@ -15,6 +15,7 @@ const project = (id: string) => ({
   business: 'fictional-a' as const,
   folderId: 'f',
   folderPath: '/x',
+  folderIdentity: null,
   repoConfirmed: true as const,
   archived: false,
   registeredAt: 'now',
@@ -66,6 +67,29 @@ describe('SQLite store', () => {
     expect(() => db.transact('two', (d) => void d.projects.push(project('p2')))).toThrow(SimulatedCrash);
     db.close();
     expect(new SqliteDb(file, new CrashHooks(), { fullSync: false }).tables.projects.map((p) => p.id)).toEqual(['p2']);
+  });
+
+  it('a crash after some rows were already changed inside the SQL transaction rolls all of it back', () => {
+    const file = path.join(tempDir('db'), 's.sqlite');
+    const hooks = new CrashHooks();
+    const db = new SqliteDb(file, hooks, { fullSync: false });
+    db.transact('add', (d) => {
+      d.projects.push(project('a'), project('b'));
+    });
+    hooks.arm('txn:many:mid'); // fires after the first of several statements has run
+    expect(() =>
+      db.transact('many', (d) => {
+        d.projects.find((p) => p.id === 'a')!.name = 'changed';
+        d.projects.find((p) => p.id === 'b')!.name = 'changed too';
+        d.projects.push(project('c'));
+      }),
+    ).toThrow(SimulatedCrash);
+    expect(db.tables.projects.map((p) => p.name)).toEqual(['Project a', 'Project b']); // memory unchanged
+    db.close();
+    const raw = new DatabaseSync(file);
+    expect((raw.prepare('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(2);
+    raw.close();
+    expect(new SqliteDb(file, new CrashHooks(), { fullSync: false }).tables.projects.map((p) => p.name)).toEqual(['Project a', 'Project b']);
   });
 
   it('writes only changed rows, keeps order, and deletes removed rows', () => {

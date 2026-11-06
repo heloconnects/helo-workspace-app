@@ -44,19 +44,25 @@ export class RealFolder implements Folder {
     }
   }
 
-  private rulesText(): string | undefined {
-    let fd: number;
+  private readRules(rootFd: number): string | undefined {
     try {
-      fd = this.native.openDir(this.root, [], false);
-    } catch {
-      return undefined;
-    }
-    try {
-      const buf = this.native.readFile(fd, 'RULES.md', MAX_RULES_BYTES);
+      const buf = this.native.readFile(rootFd, 'RULES.md', MAX_RULES_BYTES);
       if (buf === null) return undefined;
       return new TextDecoder('utf-8', { fatal: true }).decode(buf);
     } catch {
       return undefined;
+    }
+  }
+
+  private rulesText(): string | undefined {
+    let fd: number;
+    try {
+      fd = this.native.openRoot(this.root);
+    } catch {
+      return undefined;
+    }
+    try {
+      return this.readRules(fd);
     } finally {
       this.native.closeDir(fd);
     }
@@ -70,6 +76,35 @@ export class RealFolder implements Folder {
   get files(): Record<string, string> {
     const t = this.rulesText();
     return t === undefined ? {} : { 'RULES.md': t };
+  }
+
+  identity(): string | null {
+    let fd: number;
+    try {
+      fd = this.native.openRoot(this.root);
+    } catch {
+      return null;
+    }
+    try {
+      return this.native.identity(fd);
+    } finally {
+      this.native.closeDir(fd);
+    }
+  }
+
+  /**
+   * Bind the registered identity and business. From then on every write
+   * checks them on the very root handle it then writes through.
+   */
+  expect(identity: string | null, business: Business): void {
+    this.clone.checkRoot = (rootFd) => {
+      if (identity === null) return 'the folder has no registered identity; register the project again';
+      if (this.native.identity(rootFd) !== identity) return 'the folder was replaced by a different folder since registration';
+      const found = businessFromRules(this.readRules(rootFd));
+      if (found === null) return 'RULES.md is missing or names no fictional business';
+      if (found !== business) return 'the RULES.md business line no longer matches';
+      return null;
+    };
   }
 }
 

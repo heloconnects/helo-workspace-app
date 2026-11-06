@@ -203,7 +203,12 @@ app.whenReady().then(async () => {
     const dataDir = SMOKE_PERSIST && process.env.HELO_DATA_DIR ? process.env.HELO_DATA_DIR : app.getPath('userData');
     workspace = openPersistentWorkspace({ dataDir, timing: UI_TIMING, fullSync: true, onCrash }).ws;
     // Every start: recovery (F3). Anything still running when the app last stopped becomes interrupted.
-    workspace.recover();
+    // A failure here must never stop the window from opening; it is shown in the log instead.
+    try {
+      workspace.recover();
+    } catch (e) {
+      workspace.note(`Start-up recovery stopped early: ${(e as Error).message}. Use "Simulate app crash and restart" to retry it.`);
+    }
     const guards = { appRoot: APP_ROOT, home: os.homedir() };
     service = new Service(workspace, {
       mode: 'persistent',

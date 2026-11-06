@@ -88,7 +88,7 @@ describe.each(BOTH)('crash at every boundary (%s drafting)', (drafter) => {
   });
 
   it('a crash after final-status.json says complete but before the database records it keeps "complete"', async () => {
-    for (const point of ['publish:final-status.json:linked', 'publish:final-status.json:tmp-removed', 'txn:published:final-status.json:before', 'txn:final:before']) {
+    for (const point of ['publish:final-status.json:moved', 'txn:published:final-status.json:before', 'txn:final:before']) {
       const { ws, at: at0 } = await crashRun(drafter, OK, point);
       const at = at0!;
       expect(at.finalizing?.outcome, point).toBe('complete');
@@ -157,7 +157,8 @@ describe.each(BOTH)('crash at every boundary (%s drafting)', (drafter) => {
 
 describe('recovery details', () => {
   it('quarantines a mismatched record file and a leftover temporary file, and lists them as not valid records', async () => {
-    const { ws, at: at0 } = await crashRun('claude', OK, 'publish:1-draft.md:linked');
+    // Crash after the temporary file of 1-draft.md was written; then a partial 1-draft.md appears at the final name.
+    const { ws, at: at0 } = await crashRun('claude', OK, 'publish:1-draft.md:tmp-written');
     const at = at0!;
     const fs = ws.cloneOf(at.projectId);
     const dir = attemptDir(at.taskId, at.id);
@@ -174,7 +175,7 @@ describe('recovery details', () => {
     expect(ws.recordState(at.id)).toEqual({ kind: 'intact' });
   });
 
-  it('handles quarantine name collisions with -2, -3 and is repeatable', () => {
+  it('handles quarantine name collisions with -2, -3, and never replaces an earlier quarantine copy', () => {
     const { ws, a } = makeWorkspace();
     const fs = ws.cloneOf(a.id);
     const dir = 'app-records/t-x/a-x';
@@ -183,23 +184,20 @@ describe('recovery details', () => {
     fs.externalWrite(`${dir}/file.md`, 'mine');
     expect(ws.quarantine(fs, dir, 'file.md', 'w1')).toBe(`${dir}/quarantine/file.md-w1-3`);
     expect(fs.exists(`${dir}/file.md`)).toBe(false);
-    // The same content written again is a different file: it is not removed on the strength of the
-    // earlier copy, and goes to the next free name instead (nothing is lost).
     fs.externalWrite(`${dir}/file.md`, 'mine');
     expect(ws.quarantine(fs, dir, 'file.md', 'w1')).toBe(`${dir}/quarantine/file.md-w1-4`);
+    expect(fs.read(`${dir}/quarantine/file.md-w1`)).toBe('other content');
   });
 
-  it('repeats a quarantine move after a crash between the link and the removal', () => {
+  it('repeats a quarantine move after a crash: the move is atomic, so a repeat finds nothing left to move', () => {
     const { ws, a, hooks } = makeWorkspace();
     const fs = ws.cloneOf(a.id);
     const dir = 'app-records/t-x/a-x';
     fs.externalWrite(`${dir}/file.md`, 'mine');
-    hooks.arm('quarantine:file.md:linked');
+    hooks.arm('quarantine:file.md:moved');
     expect(() => ws.quarantine(fs, dir, 'file.md', 'w1')).toThrow(SimulatedCrash);
-    expect(fs.exists(`${dir}/file.md`)).toBe(true);
-    // The quarantine copy is the very same file, so only the old name is removed.
-    expect(ws.quarantine(fs, dir, 'file.md', 'w1')).toBe(`${dir}/quarantine/file.md-w1`);
     expect(fs.exists(`${dir}/file.md`)).toBe(false);
+    expect(ws.quarantine(fs, dir, 'file.md', 'w1')).toBe('');
     expect(fs.list(`${dir}/quarantine/`)).toEqual([`${dir}/quarantine/file.md-w1`]);
   });
 

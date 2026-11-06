@@ -10,6 +10,8 @@ export interface ProjectRow {
   business: Business;
   folderId: string;
   folderPath: string;
+  /** Real folders: device:inode at registration. Null for simulated folders. */
+  folderIdentity: string | null;
   repoConfirmed: true;
   archived: boolean;
   registeredAt: string;

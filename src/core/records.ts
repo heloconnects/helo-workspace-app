@@ -125,7 +125,7 @@ export function computeRecordState(attempt: AttemptRow, fs: CloneFs, rows: Recor
       } else if (quarantinedCopies(fs, dir, name).length) {
         problems.push({ file: name, path, kind: 'quarantined', detail: 'moved to quarantine; not a valid record' });
       } else {
-        problems.push({ file: name, path, kind: 'missing', detail: 'file is missing' });
+        problems.push({ file: name, path, kind: 'missing', detail: 'file is missing, or is not a readable regular file' });
       }
     } else if (want !== undefined && have !== want) {
       problems.push({ file: name, path, kind: 'mismatched', detail: `content does not match the recorded hash ${want.slice(0, 12)}…` });

@@ -22,6 +22,12 @@ export class CrashHooks {
   readonly seen: string[] = [];
   private armed = new Set<string>();
   private fired = new Set<string>();
+  /**
+   * Test-only: what happens when an armed point is reached. Default: throw
+   * SimulatedCrash. The process-kill tests set this to kill the process
+   * outright (SIGKILL), so nothing after the point runs at all.
+   */
+  onFire: ((point: string) => void) | null = null;
 
   /** Arm a point: the next time it is reached, the hook throws once. */
   arm(point: string): void {
@@ -38,6 +44,7 @@ export class CrashHooks {
     if (this.armed.has(name) && !this.fired.has(name)) {
       this.fired.add(name);
       this.armed.delete(name);
+      this.onFire?.(name);
       throw new SimulatedCrash(name);
     }
   }
@@ -56,21 +63,22 @@ export class SimFsError extends Error {
 
 /**
  * A folder handle opened once for one publication. All operations are
- * relative to it (F3): create a new file exclusively, hard-link it to a name
- * that must not exist, remove the app's own ".tmp-" file, and flush.
+ * relative to it (F3): create a new file exclusively, then move it to its
+ * final name with a no-replace move (fails if the name exists). Nothing is
+ * ever replaced and nothing is ever deleted.
  */
 export interface DirHandle {
   createExclusive(name: string, content: string, faultKey?: string): void;
-  link(from: string, to: string): void;
-  removeTemp(name: string): void;
+  /** No-replace move within this folder (macOS renameatx_np with RENAME_EXCL on real disk). */
+  publish(from: string, to: string): void;
   sync(): void;
   close(): void;
 }
 
 /**
  * One project folder as the engine sees it. Paths are relative to the folder
- * root and always built by the app from fixed patterns. There is no rename and
- * no overwrite. Implemented in memory by SimFs and on disk by RealCloneFs.
+ * root and always built by the app from fixed patterns. There is no overwrite
+ * and no delete. Implemented in memory by SimFs and on disk by RealCloneFs.
  */
 export interface CloneFs {
   readonly root: string;
@@ -78,12 +86,10 @@ export interface CloneFs {
   read(path: string): string | undefined;
   hash(path: string): string | undefined;
   list(prefix: string): string[];
-  /** Open (creating missing folders) the folder at a relative path, as a handle. */
+  /** Open (creating missing folders) the folder at a relative path, as a handle. Refused while the project is blocked. */
   openDir(dir: string): DirHandle;
-  /** Hard-link dir/name to dir/quarantine/qName; fails if qName exists. */
-  quarantineLink(dir: string, name: string, qName: string): void;
-  /** Remove dir/name only if dir/quarantine/qName is the very same file. */
-  quarantineRemove(dir: string, name: string, qName: string): void;
+  /** No-replace move of dir/name to dir/quarantine/qName; fails with EEXIST if qName exists. */
+  quarantineMove(dir: string, name: string, qName: string): void;
   /** Simulated write faults (a real disk cannot be filled on demand). */
   injectFault(recordName: string, code: 'ENOSPC' | 'EACCES', times?: number): void;
   clearFaults(): void;
@@ -94,16 +100,9 @@ export interface CloneFs {
   snapshot(): Map<string, string>;
 }
 
-interface SimFile {
-  content: string;
-  /** Stands in for device + inode: hard links share it; any other write gets a new one. */
-  identity: number;
-}
-
 /** The simulated contents of one clone folder, in memory. */
 export class SimFs implements CloneFs {
-  private files = new Map<string, SimFile>();
-  private nextIdentity = 1;
+  private files = new Map<string, string>();
   private faults = new Map<string, { code: 'ENOSPC' | 'EACCES'; remaining: number }>();
   readonly supportsExternalEdits = true;
 
@@ -114,12 +113,12 @@ export class SimFs implements CloneFs {
   }
 
   read(path: string): string | undefined {
-    return this.files.get(path)?.content;
+    return this.files.get(path);
   }
 
   hash(path: string): string | undefined {
     const f = this.files.get(path);
-    return f === undefined ? undefined : sha256(f.content);
+    return f === undefined ? undefined : sha256(f);
   }
 
   list(prefix: string): string[] {
@@ -140,36 +139,24 @@ export class SimFs implements CloneFs {
           }
         }
         if (this.files.has(path)) throw new SimFsError('EEXIST', path, 'file already exists');
-        this.files.set(path, { content, identity: this.nextIdentity++ });
+        this.files.set(path, content);
       },
-      link: (from, to) => this.linkPaths(at(from), at(to)),
-      removeTemp: (name) => {
-        if (!name.startsWith('.tmp-')) throw new SimFsError('EPERM', at(name), 'only the app\'s own .tmp- files can be removed');
-        if (!this.files.delete(at(name))) throw new SimFsError('ENOENT', at(name), 'no such file');
-      },
+      publish: (from, to) => this.move(at(from), at(to)),
       sync: () => undefined,
       close: () => undefined,
     };
   }
 
-  quarantineLink(dir: string, name: string, qName: string): void {
-    this.linkPaths(`${dir}/${checkName(name)}`, `${dir}/quarantine/${checkName(qName)}`);
+  quarantineMove(dir: string, name: string, qName: string): void {
+    this.move(`${dir}/${checkName(name)}`, `${dir}/quarantine/${checkName(qName)}`);
   }
 
-  quarantineRemove(dir: string, name: string, qName: string): void {
-    const src = `${dir}/${checkName(name)}`;
-    const q = `${dir}/quarantine/${checkName(qName)}`;
-    const a = this.files.get(src);
-    const b = this.files.get(q);
-    if (!a) throw new SimFsError('ENOENT', src, 'no such file');
-    if (!b || a.identity !== b.identity) throw new SimFsError('EPERM', src, 'the quarantine copy is not the same file; nothing removed');
-    this.files.delete(src);
-  }
-
-  private linkPaths(from: string, to: string): void {
+  /** Atomic no-replace move. */
+  private move(from: string, to: string): void {
     const f = this.files.get(from);
     if (f === undefined) throw new SimFsError('ENOENT', from, 'source missing');
     if (this.files.has(to)) throw new SimFsError('EEXIST', to, 'collision: destination name already exists');
+    this.files.delete(from);
     this.files.set(to, f);
   }
 
@@ -182,7 +169,7 @@ export class SimFs implements CloneFs {
   }
 
   externalWrite(path: string, content: string): void {
-    this.files.set(path, { content, identity: this.nextIdentity++ });
+    this.files.set(path, content);
   }
 
   externalDelete(path: string): void {
@@ -190,7 +177,7 @@ export class SimFs implements CloneFs {
   }
 
   snapshot(): Map<string, string> {
-    return new Map([...this.files].map(([k, v]) => [k, v.content]));
+    return new Map(this.files);
   }
 }
 

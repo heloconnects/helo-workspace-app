@@ -112,7 +112,7 @@ export class Workspace {
     for (const p of this.db.tables.projects) {
       if (p.folderId.startsWith('real:') && !this.folders.some((f) => f.id === p.folderId)) {
         if (!options.realFolder) throw new Error('A stored project uses a real folder, but no real-folder support was given.');
-        this.addFolder(options.realFolder(p.folderPath));
+        this.addFolder(options.realFolder(p.folderPath)).expect?.(p.folderIdentity ?? null, p.business);
       }
     }
     this.adapters = { claude: new FakeAdapter('claude', () => this.options.timing), codex: new FakeAdapter('codex', () => this.options.timing) };
@@ -195,6 +195,7 @@ export class Workspace {
     const p = this.project(projectId);
     const f = this.folder(p.folderId);
     if (f.path !== p.folderPath) return 'The folder path changed since registration. Register the project again.';
+    if (f.identity && p.folderIdentity && f.identity() !== p.folderIdentity) return 'The folder was replaced by a different folder since registration. Register the project again.';
     if (f.rulesBusiness === null) return 'RULES.md is missing from the folder. Register the project again.';
     if (f.rulesBusiness !== p.business) return 'The RULES.md business line no longer matches. Register the project again.';
     return null;
@@ -209,10 +210,13 @@ export class Workspace {
     if (f.rulesBusiness !== input.business) throw new UserError('Refused: the RULES.md "Business in this repository" line does not match the business you picked.');
     if (this.t.projects.some((p) => p.folderId === f.id)) throw new UserError('Refused: this folder is already registered as a project.');
     if (this.t.projects.some((p) => p.business === input.business)) throw new UserError('Refused: a project for this business already exists. One project per business.');
+    const folderIdentity = f.identity ? f.identity() : null;
+    if (f.kind === 'real' && folderIdentity === null) throw new UserError('Refused: the folder could not be opened safely.');
     const id = newId('p');
     this.db.transact('project-register', (d) => {
-      d.projects.push({ id, name, business: input.business, folderId: f.id, folderPath: f.path, repoConfirmed: true, archived: false, registeredAt: this.now() });
+      d.projects.push({ id, name, business: input.business, folderId: f.id, folderPath: f.path, folderIdentity, repoConfirmed: true, archived: false, registeredAt: this.now() });
     });
+    f.expect?.(folderIdentity, input.business);
     this.changed();
     return this.project(id);
   }
@@ -474,8 +478,9 @@ export class Workspace {
 
   /**
    * (1) transaction records the intent and planned hash; (2) the file is
-   * written to .tmp-<write-id> (exclusive create) and hard-linked to its final
-   * name, which fails if the name exists; the temporary file is removed;
+   * written to .tmp-<write-id> (exclusive create), flushed, and moved to its
+   * final name with a no-replace move, which fails if the name exists (approved
+   * change to F3, replacing hard link + removal, so nothing is ever deleted);
    * (3) transaction records it as published.
    */
   private publishRecord(fs: CloneFs, dir: string, attemptId: string, name: string, content: string, handle: RunHandle | null): { ok: true } | { ok: false; error: string } {
@@ -493,27 +498,27 @@ export class Workspace {
     const final = `${dir}/${name}`;
     // One folder handle for the whole publication: every step is relative to it.
     let dh: DirHandle | null = null;
+    let created = false;
     try {
       dh = fs.openDir(dir);
       dh.createExclusive(tmpName, content, name);
+      created = true;
       this.hooks.point(`publish:${name}:tmp-written`);
-      dh.link(tmpName, name);
-      this.hooks.point(`publish:${name}:linked`);
-      dh.removeTemp(tmpName);
-      dh.sync();
-      this.hooks.point(`publish:${name}:tmp-removed`);
+      dh.publish(tmpName, name); // no-replace move: fails if the name exists; nothing is deleted
+      this.hooks.point(`publish:${name}:moved`);
     } catch (e) {
-      if (!(e instanceof SimFsError)) {
-        dh?.close();
-        throw e;
-      }
-      try {
-        dh?.removeTemp(tmpName); // our own temporary file, if it was created
-      } catch {
-        /* it was not created */
-      }
       dh?.close();
       dh = null;
+      if (!(e instanceof SimFsError)) throw e;
+      // Our own temporary file, if we created it, goes to quarantine (moved, never deleted).
+      // A ".tmp-" name that already existed is someone else's and is left alone.
+      if (created) {
+        try {
+          this.quarantine(fs, dir, tmpName, writeId);
+        } catch (q) {
+          if (!(q instanceof SimFsError)) throw q;
+        }
+      }
       const error = e.code === 'EEXIST' ? `collision: ${final} already exists; nothing was replaced` : e.message;
       this.db.transact(`not-published:${name}`, (d) => {
         const r = d.recordFiles.find((x) => x.attemptId === attemptId && x.name === name)!;
@@ -522,7 +527,7 @@ export class Workspace {
       });
       return { ok: false, error };
     }
-    dh?.close();
+    dh.close();
     this.db.transact(`published:${name}`, (d) => {
       d.recordFiles.find((x) => x.attemptId === attemptId && x.name === name)!.state = 'published';
     });
@@ -895,9 +900,14 @@ export class Workspace {
     this.recovering = true;
     let interrupted = 0;
     try {
-      for (const a of this.t.attempts) this.reconcileFiles(a.id);
-      for (const a of this.t.attempts) if (this.settleOutcome(a.id)) interrupted += 1;
-      this.recoverOutsideSaves();
+      // One damaged folder must not stop recovery for the others: file errors are noted per attempt.
+      for (const a of this.t.attempts) this.isolated(`reconciling attempt ${a.number}`, () => this.reconcileFiles(a.id));
+      for (const a of this.t.attempts) {
+        this.isolated(`settling attempt ${a.number}`, () => {
+          if (this.settleOutcome(a.id)) interrupted += 1;
+        });
+      }
+      this.isolated('recovering outside reviews', () => this.recoverOutsideSaves());
     } finally {
       this.recovering = false;
     }
@@ -905,6 +915,16 @@ export class Workspace {
     this.note(`Recovery ran: ${interrupted} attempt(s) marked interrupted. No stage was re-run.`);
     this.changed();
     return { interrupted };
+  }
+
+  /** Run one recovery step; a file error (an unreadable or odd entry) is noted and recovery goes on. */
+  private isolated(what: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (e) {
+      if (!(e instanceof SimFsError)) throw e;
+      this.note(`Recovery: a file problem while ${what}: ${e.message}. Other attempts were still recovered.`);
+    }
   }
 
   /** The simulated relaunch after a crash: runs recovery only if the app is still in the crashed state. */
@@ -976,35 +996,27 @@ export class Workspace {
   quarantine(fs: CloneFs, dir: string, name: string, writeId: string): string {
     // F2: a quarantine move is a write; never write into a project that is blocked.
     if (this.blockedClone(fs)) return '';
-    const content = fs.read(`${dir}/${name}`);
-    if (content === undefined) return '';
+    // Only regular files are moved; anything else (a symlink, a FIFO) is left for the inventory to show.
+    if (fs.read(`${dir}/${name}`) === undefined) return '';
     const base = `${name}-${writeId}`;
-    const hash = sha256(content);
     const label = name.startsWith('.tmp-') ? '.tmp' : name; // stable crash-point name
     for (let n = 1; n <= 100; n++) {
       const qName = n === 1 ? base : `${base}-${n}`;
-      const existing = fs.hash(`${dir}/quarantine/${qName}`);
-      if (existing === hash) {
-        // Repeat after a crash between link and removal: remove the old name only if the
-        // quarantine copy is the very same file. Same content but a different file: try the next name.
-        try {
-          fs.quarantineRemove(dir, name, qName);
-          this.hooks.point(`quarantine:${label}:old-removed`);
-          return `${dir}/quarantine/${qName}`;
-        } catch (e) {
-          if (e instanceof SimFsError && e.code === 'EPERM') continue;
-          throw e;
-        }
+      if (fs.hash(`${dir}/quarantine/${qName}`) !== undefined) continue;
+      try {
+        // Atomic no-replace move: whatever is at the name is moved, never deleted. Repeatable: after a
+        // crash the source is simply gone.
+        fs.quarantineMove(dir, name, qName);
+      } catch (e) {
+        if (e instanceof SimFsError && e.code === 'EEXIST') continue;
+        throw e;
       }
-      if (existing !== undefined) continue;
-      fs.quarantineLink(dir, name, qName);
-      this.hooks.point(`quarantine:${label}:linked`);
-      fs.quarantineRemove(dir, name, qName);
-      this.hooks.point(`quarantine:${label}:old-removed`);
+      this.hooks.point(`quarantine:${label}:moved`);
       return `${dir}/quarantine/${qName}`;
     }
     throw new Error('quarantine: too many name collisions');
   }
+
 
 
   /** Returns true when the attempt was marked interrupted by this call. */
@@ -1124,15 +1136,14 @@ export class Workspace {
       this.hooks.point('outside:tmp-written');
       for (let tries = 0; ; tries++) {
         if (tries >= 100) {
-          dh.removeTemp(tmpName);
           this.db.transact('outside:not-saved', (d) => {
             d.outsideSaves.find((s) => s.saveId === saveId)!.state = 'not_saved';
           });
-          throw new UserError('Could not find a free outside-review number after 100 tries.');
+          throw new UserError('Could not find a free outside-review number after 100 tries. The pasted text was kept as a temporary file; it is moved to quarantine on the next start.');
         }
         try {
-          dh.link(tmpName, `${number}-${input.source}-${date}.md`);
-          this.hooks.point('outside:linked');
+          dh.publish(tmpName, `${number}-${input.source}-${date}.md`); // no-replace move
+          this.hooks.point('outside:moved');
           break;
         } catch (e) {
           if (!(e instanceof SimFsError) || e.code !== 'EEXIST') throw e;
@@ -1142,9 +1153,6 @@ export class Workspace {
           });
         }
       }
-      dh.removeTemp(tmpName);
-      dh.sync();
-      this.hooks.point('outside:tmp-removed');
     } finally {
       dh.close();
     }

@@ -233,8 +233,8 @@ describe('finding 4 (Medium): project identity is rechecked before every write',
 describe('re-review regression (Medium): a blocked project is still reconciled before its outcome is settled', () => {
   it.each(BOTH)('a record published just before the crash stays required when recovery runs while blocked (%s drafting)', async (drafter) => {
     const { ws, a } = makeWorkspace();
-    // 1. Crash after the hard link publishes 1-draft.md, before its database acknowledgement.
-    const t = makeTask(ws, a.id, drafter, { ...OK, crashAt: 'publish:1-draft.md:linked' });
+    // 1. Crash after 1-draft.md is published under its final name, before its database acknowledgement.
+    const t = makeTask(ws, a.id, drafter, { ...OK, crashAt: 'publish:1-draft.md:moved' });
     const at = start(ws, t.id);
     await ws.settled(at.id);
     const fs = ws.cloneOf(a.id);
@@ -248,8 +248,7 @@ describe('re-review regression (Medium): a blocked project is still reconciled b
     expect(fin.outcome).toBe('interrupted');
     expect(fin.files.map((f) => f.name)).toEqual(['packet.md', 'sharing-plan.json', '1-draft-sent.json', '1-draft.md']);
     expect(fs.snapshot()).toEqual(before);
-    expect(fs.list(`${dir}/.tmp-`)).toHaveLength(1); // the leftover waits for the unblock
-    // 4. Unblock and recover: the leftover is quarantined, final-status.json is published.
+    // 4. Unblock and recover: final-status.json is published.
     simFolder(ws, 'folder-a').rulesBusiness = 'fictional-a';
     ws.recover();
     expect(fs.list(`${dir}/.tmp-`)).toEqual([]);
@@ -263,7 +262,7 @@ describe('re-review regression (Medium): a blocked project is still reconciled b
 
   it('a mismatched intended record is never counted as published while blocked, and is quarantined after the unblock', async () => {
     const { ws, a } = makeWorkspace();
-    const t = makeTask(ws, a.id, 'claude', { ...OK, crashAt: 'publish:2-review.md:linked' });
+    const t = makeTask(ws, a.id, 'claude', { ...OK, crashAt: 'publish:2-review.md:moved' });
     const at = start(ws, t.id);
     await ws.settled(at.id);
     const fs = ws.cloneOf(a.id);

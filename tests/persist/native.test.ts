@@ -1,6 +1,7 @@
 // The safe_publish native helper, on real temporary folders.
 
-import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadSafePublish } from '../../src/persist/native.js';
@@ -18,14 +19,26 @@ function code(f: () => unknown): string {
   return 'no error';
 }
 
+/** Open a folder below a root, the way the app does: root handle first, then relative to it. */
+function open(root: string, segs: string[], create = true): number {
+  const r = n.openRoot(root);
+  try {
+    return n.openSub(r, segs, create);
+  } finally {
+    n.closeDir(r);
+  }
+}
+
 describe('safe_publish native helper', () => {
-  it('creates folders, writes a temporary file exclusively, publishes with a no-replace link and removes the temporary file', () => {
+  it('offers no way to delete anything', () => {
+    expect(Object.keys(n).sort()).toEqual(['closeDir', 'createExclusive', 'fsyncDir', 'identity', 'listDir', 'moveNoReplace', 'openRoot', 'openSub', 'readFile']);
+  });
+
+  it('creates folders, writes a temporary file exclusively and publishes it with a no-replace move', () => {
     const root = tempDir('n');
-    const fd = n.openDir(root, ['app-records', 't1', 'a1'], true);
+    const fd = open(root, ['app-records', 't1', 'a1']);
     n.createExclusive(fd, '.tmp-w1', Buffer.from('hello'), false);
-    n.linkNoReplace(fd, '.tmp-w1', 'packet.md');
-    n.removeTemp(fd, '.tmp-w1');
-    n.fsyncDir(fd, true); // F_FULLFSYNC path
+    n.moveNoReplace(fd, '.tmp-w1', fd, 'packet.md', true); // F_FULLFSYNC path
     expect(readFileSync(path.join(root, 'app-records/t1/a1/packet.md'), 'utf8')).toBe('hello');
     expect(existsSync(path.join(root, 'app-records/t1/a1/.tmp-w1'))).toBe(false);
     expect(n.readFile(fd, 'packet.md', 100)!.toString()).toBe('hello');
@@ -34,120 +47,133 @@ describe('safe_publish native helper', () => {
     n.closeDir(fd);
   });
 
-  it('never replaces an existing file: exclusive create and the publishing link both fail with EEXIST', () => {
+  it('never replaces an existing file: exclusive create and the publishing move both fail with EEXIST, and the temporary file is kept', () => {
     const root = tempDir('n');
-    const fd = n.openDir(root, ['app-records'], true);
+    const fd = open(root, ['app-records']);
     writeFileSync(path.join(root, 'app-records', 'final.md'), 'someone else');
     expect(code(() => n.createExclusive(fd, 'final.md', Buffer.from('mine'), false))).toBe('EEXIST');
     n.createExclusive(fd, '.tmp-x', Buffer.from('mine'), false);
-    expect(code(() => n.linkNoReplace(fd, '.tmp-x', 'final.md'))).toBe('EEXIST');
+    expect(code(() => n.moveNoReplace(fd, '.tmp-x', fd, 'final.md', false))).toBe('EEXIST');
     expect(readFileSync(path.join(root, 'app-records', 'final.md'), 'utf8')).toBe('someone else');
+    expect(readFileSync(path.join(root, 'app-records', '.tmp-x'), 'utf8')).toBe('mine'); // nothing deleted
     n.closeDir(fd);
   });
 
   it('a destination created by another process after the temporary file was made is never replaced', () => {
     const root = tempDir('n');
-    const fd = n.openDir(root, ['app-records'], true);
+    const fd = open(root, ['app-records']);
     n.createExclusive(fd, '.tmp-x', Buffer.from('mine'), false);
     writeFileSync(path.join(root, 'app-records', 'record.md'), 'raced in'); // the other process
-    expect(code(() => n.linkNoReplace(fd, '.tmp-x', 'record.md'))).toBe('EEXIST');
+    expect(code(() => n.moveNoReplace(fd, '.tmp-x', fd, 'record.md', false))).toBe('EEXIST');
     expect(readFileSync(path.join(root, 'app-records', 'record.md'), 'utf8')).toBe('raced in');
     n.closeDir(fd);
   });
 
-  it('refuses a symlink at the root, at any folder level, and as a file', () => {
+  it('refuses a symlink at the root, anywhere in the root path, at any folder level, and as a file', () => {
     const real = tempDir('real');
     const elsewhere = tempDir('elsewhere');
     const link = path.join(tempDir('links'), 'root-link');
     symlinkSync(real, link);
-    expect(code(() => n.openDir(link, [], false))).toBe('ELOOP');
-    // A symlink in any component of the root path (O_NOFOLLOW_ANY).
+    expect(code(() => n.openRoot(link))).toBe('ELOOP');
     const parentLink = path.join(tempDir('links'), 'parent-link');
     symlinkSync(path.dirname(real), parentLink);
-    expect(['ELOOP', 'ENOTDIR']).toContain(code(() => n.openDir(path.join(parentLink, path.basename(real)), [], false)));
-    // A symlinked folder inside the tree.
+    expect(['ELOOP', 'ENOTDIR']).toContain(code(() => n.openRoot(path.join(parentLink, path.basename(real)))));
     mkdirSync(path.join(real, 'app-records'));
     symlinkSync(elsewhere, path.join(real, 'app-records', 't1'));
-    expect(['ELOOP', 'ENOTDIR']).toContain(code(() => n.openDir(real, ['app-records', 't1'], true)));
-    // A symlink where a file is read.
-    const fd = n.openDir(real, ['app-records'], false);
+    expect(['ELOOP', 'ENOTDIR']).toContain(code(() => open(real, ['app-records', 't1'])));
+    const fd = open(real, ['app-records'], false);
     writeFileSync(path.join(elsewhere, 'secret.md'), 'outside');
     symlinkSync(path.join(elsewhere, 'secret.md'), path.join(real, 'app-records', 'x.md'));
-    expect(code(() => n.readFile(fd, 'x.md', 100))).toBe('ELOOP');
+    expect(code(() => n.readFile(fd, 'x.md', 100))).toBe('EINVAL'); // not a regular file: never read through
     expect(n.listDir(fd).find((e) => e.name === 'x.md')?.kind).toBe('other');
     expect(n.listDir(fd).find((e) => e.name === 't1')?.kind).toBe('other');
     n.closeDir(fd);
   });
 
-  it('a folder replaced by a symlink or another folder after it was opened cannot redirect the write', () => {
+  it('the root folder swapped after it was opened and checked cannot redirect the write (F2 check tied to the write handle)', () => {
+    const parent = tempDir('p');
+    const root = path.join(parent, 'clone');
+    mkdirSync(root);
+    writeFileSync(path.join(root, 'RULES.md'), 'checked');
+    const r = n.openRoot(root);
+    const id = n.identity(r);
+    expect(n.readFile(r, 'RULES.md', 100)!.toString()).toBe('checked'); // the check, through the handle
+    // Now the folder is swapped for another plain folder at the same path.
+    renameSync(root, path.join(parent, 'clone-moved'));
+    mkdirSync(root);
+    writeFileSync(path.join(root, 'RULES.md'), 'impostor');
+    const fd = n.openSub(r, ['app-records'], true);
+    n.createExclusive(fd, '.tmp-w', Buffer.from('record'), false);
+    n.moveNoReplace(fd, '.tmp-w', fd, 'packet.md', false);
+    n.closeDir(fd);
+    n.closeDir(r);
+    expect(existsSync(path.join(root, 'app-records'))).toBe(false);
+    expect(readFileSync(path.join(parent, 'clone-moved', 'app-records', 'packet.md'), 'utf8')).toBe('record');
+    // A fresh open of the path sees the impostor, whose identity differs.
+    const r2 = n.openRoot(root);
+    expect(n.identity(r2)).not.toBe(id);
+    n.closeDir(r2);
+  });
+
+  it('a folder below the root swapped after it was opened cannot redirect the write either', () => {
     const root = tempDir('n');
     const elsewhere = tempDir('elsewhere');
-    const fd = n.openDir(root, ['app-records', 't1', 'a1'], true);
-    // Swap the attempt folder: move it away and put a symlink to another folder in its place.
+    const fd = open(root, ['app-records', 't1', 'a1']);
     renameSync(path.join(root, 'app-records/t1/a1'), path.join(root, 'app-records/t1/a1-moved'));
     symlinkSync(elsewhere, path.join(root, 'app-records/t1/a1'));
     n.createExclusive(fd, '.tmp-w', Buffer.from('record'), false);
-    n.linkNoReplace(fd, '.tmp-w', 'packet.md');
+    n.moveNoReplace(fd, '.tmp-w', fd, 'packet.md', false);
     n.closeDir(fd);
     expect(existsSync(path.join(elsewhere, 'packet.md'))).toBe(false);
     expect(readFileSync(path.join(root, 'app-records/t1/a1-moved/packet.md'), 'utf8')).toBe('record');
-    // Replaced by a different plain folder: same result.
-    const fd2 = n.openDir(root, ['app-records', 't2'], true);
-    renameSync(path.join(root, 'app-records/t2'), path.join(root, 'app-records/t2-moved'));
-    mkdirSync(path.join(root, 'app-records/t2'));
-    n.createExclusive(fd2, '.tmp-v', Buffer.from('record'), false);
-    n.closeDir(fd2);
-    expect(existsSync(path.join(root, 'app-records/t2/.tmp-v'))).toBe(false);
-    expect(existsSync(path.join(root, 'app-records/t2-moved/.tmp-v'))).toBe(true);
+  });
+
+  it('moves into quarantine across two folder handles without replacing anything', () => {
+    const root = tempDir('n');
+    const fd = open(root, ['d']);
+    const qfd = open(root, ['d', 'quarantine']);
+    writeFileSync(path.join(root, 'd', 'bad.md'), 'content');
+    writeFileSync(path.join(root, 'd', 'quarantine', 'taken'), 'earlier copy');
+    expect(code(() => n.moveNoReplace(fd, 'bad.md', qfd, 'taken', false))).toBe('EEXIST');
+    expect(readFileSync(path.join(root, 'd', 'quarantine', 'taken'), 'utf8')).toBe('earlier copy');
+    n.moveNoReplace(fd, 'bad.md', qfd, 'bad.md-w1', false);
+    expect(existsSync(path.join(root, 'd', 'bad.md'))).toBe(false);
+    expect(readFileSync(path.join(root, 'd', 'quarantine', 'bad.md-w1'), 'utf8')).toBe('content');
+    n.closeDir(fd);
+    n.closeDir(qfd);
   });
 
   it('rejects names that are not a single plain component', () => {
     const root = tempDir('n');
+    const r = n.openRoot(root);
     for (const bad of ['', '.', '..', 'a/b', '../x', 'a\0b']) {
-      expect(code(() => n.openDir(root, [bad], true)), JSON.stringify(bad)).toBe('EINVAL');
+      expect(code(() => n.openSub(r, [bad], true)), JSON.stringify(bad)).toBe('EINVAL');
     }
-    const fd = n.openDir(root, [], false);
-    for (const bad of ['..', 'x/y', '']) expect(code(() => n.createExclusive(fd, bad, Buffer.from('x'), false))).toBe('EINVAL');
-    expect(code(() => n.openDir('relative/path', [], false))).toBe('EINVAL');
-    n.closeDir(fd);
+    for (const bad of ['..', 'x/y', '']) expect(code(() => n.createExclusive(r, bad, Buffer.from('x'), false))).toBe('EINVAL');
+    expect(code(() => n.moveNoReplace(r, 'a', r, '../b', false))).toBe('EINVAL');
+    expect(code(() => n.openRoot('relative/path'))).toBe('EINVAL');
+    n.closeDir(r);
   });
 
-  it('removes only its own .tmp- files', () => {
+  it('reads regular files only: a FIFO is refused at once without hanging, and size is limited', () => {
     const root = tempDir('n');
-    const fd = n.openDir(root, [], false);
-    writeFileSync(path.join(root, 'packet.md'), 'record');
-    expect(code(() => n.removeTemp(fd, 'packet.md'))).toBe('EPERM');
-    expect(existsSync(path.join(root, 'packet.md'))).toBe(true);
-    mkdirSync(path.join(root, '.tmp-dir'));
-    expect(code(() => n.removeTemp(fd, '.tmp-dir'))).toBe('EPERM');
+    const fd = open(root, [], false);
+    execFileSync('mkfifo', [path.join(root, 'fifo.md')]); // test setup only
+    const t0 = Date.now();
+    expect(code(() => n.readFile(fd, 'fifo.md', 100))).toBe('EINVAL');
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(n.listDir(fd).find((e) => e.name === 'fifo.md')?.kind).toBe('other');
+    mkdirSync(path.join(root, 'sub'));
+    expect(code(() => n.readFile(fd, 'sub', 100))).toBe('EINVAL');
+    writeFileSync(path.join(root, 'big'), 'x'.repeat(200));
+    expect(code(() => n.readFile(fd, 'big', 100))).toBe('EFBIG');
     n.closeDir(fd);
-  });
-
-  it('removes a quarantined file\'s old name only when quarantine holds the very same file', () => {
-    const root = tempDir('n');
-    const fd = n.openDir(root, ['d'], true);
-    const qfd = n.openDir(root, ['d', 'quarantine'], true);
-    writeFileSync(path.join(root, 'd', 'bad.md'), 'content');
-    // A different file with the same content in quarantine is not enough.
-    writeFileSync(path.join(root, 'd', 'quarantine', 'copy'), 'content');
-    expect(code(() => n.removeQuarantined(fd, 'bad.md', qfd, 'copy'))).toBe('EPERM');
-    expect(existsSync(path.join(root, 'd', 'bad.md'))).toBe(true);
-    n.linkInto(fd, 'bad.md', qfd, 'bad.md-w1');
-    expect(statSync(path.join(root, 'd', 'bad.md')).ino).toBe(statSync(path.join(root, 'd', 'quarantine', 'bad.md-w1')).ino);
-    n.removeQuarantined(fd, 'bad.md', qfd, 'bad.md-w1');
-    expect(existsSync(path.join(root, 'd', 'bad.md'))).toBe(false);
-    expect(readFileSync(path.join(root, 'd', 'quarantine', 'bad.md-w1'), 'utf8')).toBe('content');
-    // linkInto never replaces either.
-    writeFileSync(path.join(root, 'd', 'other.md'), 'x');
-    expect(code(() => n.linkInto(fd, 'other.md', qfd, 'bad.md-w1'))).toBe('EEXIST');
-    n.closeDir(fd);
-    n.closeDir(qfd);
   });
 
   it('reports a permission error with its code and the name', () => {
     const root = tempDir('n');
     mkdirSync(path.join(root, 'locked'));
-    const fd = n.openDir(root, ['locked'], false);
+    const fd = open(root, ['locked'], false);
     chmodSync(path.join(root, 'locked'), 0o500);
     try {
       let err: Error & { code?: string } = new Error('none');
@@ -162,20 +188,5 @@ describe('safe_publish native helper', () => {
       chmodSync(path.join(root, 'locked'), 0o700);
       n.closeDir(fd);
     }
-  });
-
-  it('reads regular files only, within a size limit', () => {
-    const root = tempDir('n');
-    const fd = n.openDir(root, [], false);
-    mkdirSync(path.join(root, 'sub'));
-    expect(code(() => n.readFile(fd, 'sub', 100))).toBe('EINVAL');
-    writeFileSync(path.join(root, 'big'), 'x'.repeat(200));
-    expect(code(() => n.readFile(fd, 'big', 100))).toBe('EFBIG');
-    // A hard link to a file elsewhere is still just a regular file in this folder.
-    const outside = tempDir('o');
-    writeFileSync(path.join(outside, 'f'), 'linked');
-    linkSync(path.join(outside, 'f'), path.join(root, 'hard'));
-    expect(n.readFile(fd, 'hard', 100)!.toString()).toBe('linked');
-    n.closeDir(fd);
   });
 });

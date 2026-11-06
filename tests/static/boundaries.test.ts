@@ -82,22 +82,24 @@ describe('source boundaries', () => {
     }
   });
 
-  it('the native helper offers only the F3 operations (no rename, overwrite, truncate, process or network calls)', () => {
+  it('the native helper offers only the F3 operations (no delete, plain rename, overwrite, truncate, process or network calls)', () => {
     // Code only: comments removed, so wording in comments cannot hide or fake a match.
     const c = read(path.join(ROOT, 'src/native/safe_publish.c'))
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/\/\/.*$/gm, '');
-    for (const re of [/\brename(at)?\s*\(/, /O_TRUNC/, /\bunlink\s*\(/, /\bremove\s*\(/, /\brmdir\s*\(/, /\bsystem\s*\(/, /\bexec[lv]p?e?\s*\(/, /\bfork\s*\(/, /\bsocket\s*\(/, /\bconnect\s*\(/, /\bsymlink(at)?\s*\(/, /\bchmod\s*\(/]) {
+    for (const re of [/\brename(at)?\s*\(/, /\brenamex_np\s*\(/, /O_TRUNC/, /\bunlink(at)?\s*\(/, /\bremove\s*\(/, /\brmdir\s*\(/, /\bsystem\s*\(/, /\bexec[lv]p?e?\s*\(/, /\bfork\s*\(/, /\bsocket\s*\(/, /\bconnect\s*\(/, /\bsymlink(at)?\s*\(/, /\bchmod\s*\(/, /\blink(at)?\s*\(/]) {
       expect(c, String(re)).not.toMatch(re);
     }
-    // unlinkat: cleanup of the helper's own new file (2), removeTemp (1), removeQuarantined (1).
-    expect(c.match(/\bunlinkat\s*\(/g)).toHaveLength(4);
+    // Moves only ever use the no-replace flag; there is exactly one.
+    expect(c.match(/\brenameatx_np\s*\(/g)).toHaveLength(1);
+    expect(c).toMatch(/renameatx_np\(sfd, name, dfd, dest, MOVE_FLAGS\)/);
+    expect(c).toMatch(/#define MOVE_FLAGS \(RENAME_EXCL \| RENAME_NOFOLLOW_ANY\)/);
+    expect(c).toMatch(/#define MOVE_FLAGS RENAME_EXCL/);
     expect(c).toMatch(/O_CREAT \| O_EXCL \| O_NOFOLLOW/);
     expect(c).toMatch(/O_NOFOLLOW_ANY/);
-    expect(c).toMatch(/strncmp\(name, "\.tmp-", 5\) != 0/);
-    expect(c).toMatch(/a\.st_dev != b\.st_dev \|\| a\.st_ino != b\.st_ino/);
+    expect(c).toMatch(/O_RDONLY \| O_NOFOLLOW \| O_NONBLOCK/);
     const exported = [...c.matchAll(/\{"(\w+)", NULL,/g)].map((m) => m[1]);
-    expect(exported).toEqual(['openDir', 'closeDir', 'createExclusive', 'linkNoReplace', 'linkInto', 'removeTemp', 'removeQuarantined', 'fsyncDir', 'readFile', 'listDir']);
+    expect(exported).toEqual(['openRoot', 'openSub', 'identity', 'closeDir', 'createExclusive', 'moveNoReplace', 'fsyncDir', 'readFile', 'listDir']);
   });
 
   it('only the main process and the persistence layer load the native helper; the interface never does', () => {

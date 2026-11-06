@@ -7,13 +7,16 @@ import path from 'node:path';
 export type EntryKind = 'file' | 'dir' | 'other';
 
 export interface SafePublish {
-  openDir(root: string, segments: string[], create: boolean): number;
+  /** Open the project root as a handle; refuses a symlink anywhere in the path. */
+  openRoot(root: string): number;
+  /** Open (optionally creating, and flushing each new entry) a folder below an open handle; returns a new handle. */
+  openSub(baseFd: number, segments: string[], create: boolean): number;
+  /** "dev:ino" of an open folder. */
+  identity(fd: number): string;
   closeDir(fd: number): void;
   createExclusive(fd: number, name: string, data: Buffer, fullSync: boolean): void;
-  linkNoReplace(fd: number, from: string, to: string): void;
-  linkInto(srcFd: number, name: string, destFd: number, destName: string): void;
-  removeTemp(fd: number, name: string): void;
-  removeQuarantined(srcFd: number, name: string, quarantineFd: number, quarantineName: string): void;
+  /** Atomic no-replace move (renameatx_np RENAME_EXCL); flushes both folders. */
+  moveNoReplace(srcFd: number, name: string, destFd: number, destName: string, fullSync: boolean): void;
   fsyncDir(fd: number, fullSync: boolean): void;
   readFile(fd: number, name: string, maxBytes: number): Buffer | null;
   listDir(fd: number): { name: string; kind: EntryKind }[];

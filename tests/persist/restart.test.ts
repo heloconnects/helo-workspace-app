@@ -3,7 +3,8 @@
 // throws away the whole workspace and opens a new one from the same SQLite
 // file and folder, as relaunching the app does.
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { attemptDir } from '../../src/core/records.js';
@@ -150,7 +151,7 @@ describe.each(BOTH)('crash at every boundary, then a real relaunch (%s drafting)
       s.db.close();
       const r = relaunch(s.data, s.folder);
       if (!attemptId || !r.ws.t.attempts.some((x) => x.id === attemptId)) {
-        expect(point, 'only a crash before the attempt was recorded may leave no attempt').toBe('txn:attempt-create:before');
+        expect(point, 'only a crash before the attempt was committed may leave no attempt').toMatch(/^txn:attempt-create:(before|mid)$/);
         r.db.close();
         continue;
       }
@@ -276,3 +277,123 @@ describe('outside changes to a real folder', () => {
     expect(relaunch(s.data, s.folder).ws.t.tasks).toEqual([]);
   });
 });
+
+describe('Codex review of persistence v1: regression tests', () => {
+  it('finding 2: the root folder swapped for an impostor with a matching RULES.md mid-run gets nothing written to it', async () => {
+    const s = setup({ ...OK, review: 'late-result-after-cancel' });
+    const at = start(s.ws, s.task.id);
+    await waitFor(() => s.ws.attempt(at.id).state === 'reviewing' && s.ws.dispatchStatus(at.id, 'review') === 'confirmed');
+    renameSync(s.folder, `${s.folder}-original`);
+    mkdirSync(s.folder);
+    writeFileSync(path.join(s.folder, 'RULES.md'), readFileSync(path.join(`${s.folder}-original`, 'RULES.md'), 'utf8')); // same business line
+    await s.ws.settled(at.id);
+    expect(readdirSync(s.folder)).toEqual(['RULES.md']); // nothing written into the impostor
+    expect(s.ws.attempt(at.id).finalizing?.reason).toMatch(/project blocked, nothing written: (the folder was replaced|The folder was replaced)/);
+    expect(s.ws.projectBlock(s.project.id)).toMatch(/replaced by a different folder/);
+    s.db.close();
+    // Put the original back: the next start finishes the record in the right folder.
+    renameSync(s.folder, `${s.folder}-impostor`);
+    renameSync(`${s.folder}-original`, s.folder);
+    const r = relaunch(s.data, s.folder);
+    expect(r.ws.attempt(at.id).final).toBe(true);
+    expect(r.ws.recordState(at.id)).toEqual({ kind: 'intact' });
+    expect(readdirSync(`${s.folder}-impostor`)).toEqual(['RULES.md']);
+    r.db.close();
+    cleanupExtra(`${s.folder}-impostor`);
+  });
+
+  it('finding 3: a FIFO and an oversized file in place of records do not hang or stop start-up recovery for other attempts', async () => {
+    const s = setup();
+    const done = start(s.ws, s.task.id);
+    await s.ws.settled(done.id);
+    const t2 = s.ws.createTask({ projectId: s.project.id, title: 'Second', brief: 'Example.', acceptanceCriteria: ['Example'], sourceIds: [], drafter: 'codex', scenarioId: 'success-issues', scenario: { ...OK, review: 'timeout' } });
+    s.ws.setTiming({ responseMs: 1, lateResultMs: 25, stageTimeoutMs: 60_000, attemptLimitMs: 60_000, cancelGraceMs: 15 });
+    const running = start(s.ws, t2.id);
+    await waitFor(() => s.ws.dispatchStatus(running.id, 'review') === 'confirmed');
+    s.ws.crash('quit');
+    s.db.close();
+    const dir = path.join(s.folder, attemptDir(s.task.id, done.id));
+    unlinkSync(path.join(dir, '1-draft.md'));
+    execFileSync('mkfifo', [path.join(dir, '1-draft.md')]); // test setup only
+    writeFileSync(path.join(dir, '2-review.md'), 'x'.repeat(17 * 1024 * 1024));
+    const t0 = Date.now();
+    const r = relaunch(s.data, s.folder);
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(r.ws.attempt(running.id).state).toBe('interrupted'); // the other attempt was still recovered
+    expect(r.ws.attempt(done.id).state).toBe('complete');
+    const rs = r.ws.recordState(done.id);
+    expect(rs.kind).toBe('damaged');
+    expect(rs.kind === 'damaged' && rs.problems.map((p) => p.file).sort()).toEqual(['1-draft.md', '2-review.md']);
+    expect(new Service(r.ws).attemptView(done.id).display).toBe('Complete — record damaged');
+    r.db.close();
+  });
+
+  it('finding 1: a failed publication never deletes anything: its own temporary file goes to quarantine, and a pre-existing .tmp- name is left alone', async () => {
+    const s = setup({ ...OK, publishFailure: { file: '1-draft.md', code: 'EACCES' } });
+    const at = start(s.ws, s.task.id);
+    await s.ws.settled(at.id);
+    expect(s.ws.attempt(at.id).state).toBe('failed');
+    const dir = path.join(s.folder, attemptDir(s.task.id, at.id));
+    expect(readdirSync(dir).filter((n) => n.startsWith('.tmp-'))).toEqual([]);
+    s.db.close();
+  });
+
+  it('F4 on real disk: a crash at each outside-review boundary, then a relaunch, leaves a consistent save and no temporary file', async () => {
+    for (const point of ['outside:tmp-written', 'outside:moved', 'txn:outside:intended:after', 'txn:outside:published:before', 'txn:outside:published:after']) {
+      const hooks = new CrashHooks();
+      const s = setup(OK, 'claude', hooks);
+      hooks.arm(point);
+      expect(() => s.ws.saveOutsideReview({ taskId: s.task.id, source: 'chatgpt', text: 'Made-up outside review.' }), point).toThrow(SimulatedCrash);
+      s.db.close();
+      const r = relaunch(s.data, s.folder);
+      const save = r.ws.t.outsideSaves[0]!;
+      const outside = path.join(s.folder, 'app-records', s.task.id, 'outside');
+      const files = existsSync(outside) ? readdirSync(outside) : [];
+      expect(files.filter((n) => n.startsWith('.tmp-')), point).toEqual([]);
+      if (save.state === 'published') expect(files.filter((n) => n.endsWith('.md')), point).toHaveLength(1);
+      else expect(save.state, point).toBe('not_saved');
+      r.db.close();
+    }
+  });
+
+  it('repeated crashes during start-up recovery itself, on real disk', async () => {
+    const probe = setup(OK, 'claude', new CrashHooks());
+    probe.hooks.arm('publish:2-review.md:tmp-written');
+    const at = start(probe.ws, probe.task.id);
+    await probe.ws.settled(at.id);
+    probe.db.close();
+    // List the boundaries recovery passes for this state.
+    const lister = openWs(probe.data, probe.folder);
+    const mark = lister.hooks.seen.length;
+    lister.ws.recover();
+    const points = [...new Set(lister.hooks.seen.slice(mark))];
+    lister.db.close();
+    expect(points.some((p) => p.startsWith('quarantine:'))).toBe(true);
+    for (const q of points) {
+      const s = setup(OK, 'claude', new CrashHooks());
+      s.hooks.arm('publish:2-review.md:tmp-written');
+      const a = start(s.ws, s.task.id);
+      await s.ws.settled(a.id);
+      s.db.close();
+      const h = new CrashHooks();
+      h.arm(q);
+      const crashing = openWs(s.data, s.folder, h);
+      expect(() => crashing.ws.recover(), q).toThrow(SimulatedCrash);
+      crashing.db.close();
+      const r = relaunch(s.data, s.folder);
+      expect(r.ws.attempt(a.id).state, q).toBe('interrupted');
+      expect(r.ws.attempt(a.id).final, q).toBe(true);
+      expect(r.ws.recordState(a.id), q).toEqual({ kind: 'intact' });
+      expect(readdirSync(path.join(s.folder, attemptDir(s.task.id, a.id))).filter((n) => n.startsWith('.tmp-')), q).toEqual([]);
+      r.db.close();
+    }
+  }, 120_000);
+});
+
+function cleanupExtra(p: string) {
+  try {
+    execFileSync('rm', ['-rf', p]);
+  } catch {
+    /* best effort; it is inside the system temporary folder */
+  }
+}

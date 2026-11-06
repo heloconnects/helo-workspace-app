@@ -1,7 +1,10 @@
 // A real project folder for the engine. Every operation goes through the
-// safe_publish native helper: folders are opened as handles one component at
-// a time without following symlinks, files are created exclusively and
-// published with a no-replace hard link. This file never writes with node:fs.
+// safe_publish native helper. Writes first open the project root as a handle,
+// check that handle (its identity and the RULES.md read through it), and then
+// open the target folder relative to that same handle, so the folder that was
+// checked is the folder written to (F2 tied to F3). Files are created
+// exclusively and published with a no-replace move. Nothing is ever replaced
+// or deleted. This file never uses node:fs.
 
 import { sha256 } from '../core/hash.js';
 import { checkName, SimFsError, type CloneFs, type DirHandle } from '../core/sim-store.js';
@@ -17,10 +20,15 @@ export interface RealCloneOptions {
   fullSync: boolean;
 }
 
+/** Checks an open root handle before any write through it. Returns a blocking reason, or null. */
+export type RootCheck = (rootFd: number) => string | null;
+
 export class RealCloneFs implements CloneFs {
   readonly supportsExternalEdits = false;
   private readonly native: SafePublish;
   private faults = new Map<string, { code: 'ENOSPC' | 'EACCES'; remaining: number }>();
+  /** Set when the folder is registered; until then every write is refused. */
+  checkRoot: RootCheck = () => 'the folder is not registered as a project';
 
   constructor(
     readonly root: string,
@@ -48,22 +56,41 @@ export class RealCloneFs implements CloneFs {
     throw new SimFsError(nativeCode(e), `${this.root}/${where}`, (e as Error).message);
   }
 
-  /** Open a folder handle, or null when it (or a parent) does not exist or is not a plain folder. */
-  private tryOpen(dir: string): number | null {
+  /**
+   * Open the folder at `dir` below the project root. For writes the root
+   * handle is checked first and the folder is opened relative to it.
+   */
+  private openUnder(dir: string, opts: { create: boolean; forWrite: boolean }): number {
+    const segs = this.segments(dir);
+    let rootFd: number;
     try {
-      return this.native.openDir(this.root, this.segments(dir), false);
+      rootFd = this.native.openRoot(this.root);
     } catch (e) {
-      const code = nativeCode(e);
-      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') return null;
-      this.fail(e, dir);
+      this.fail(e, '');
+    }
+    try {
+      if (opts.forWrite) {
+        const reason = this.checkRoot(rootFd);
+        if (reason) throw new SimFsError('EPERM', this.root, `project blocked, nothing written: ${reason}`);
+      }
+      try {
+        return this.native.openSub(rootFd, segs, opts.create);
+      } catch (e) {
+        this.fail(e, dir);
+      }
+    } finally {
+      this.native.closeDir(rootFd);
     }
   }
 
-  private open(dir: string, create: boolean): number {
+  /** Open for reading, or null when the folder (or a parent) does not exist or is not a plain folder. */
+  private tryOpen(dir: string): number | null {
     try {
-      return this.native.openDir(this.root, this.segments(dir), create);
+      return this.openUnder(dir, { create: false, forWrite: false });
     } catch (e) {
-      this.fail(e, dir);
+      const code = e instanceof SimFsError ? e.code : nativeCode(e);
+      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') return null;
+      throw e;
     }
   }
 
@@ -77,8 +104,8 @@ export class RealCloneFs implements CloneFs {
       return buf === null ? undefined : buf.toString('utf8');
     } catch (e) {
       const code = nativeCode(e);
-      // A symlink or a non-regular file where a record should be: not a valid record.
-      if (code === 'ELOOP' || code === 'EINVAL') return undefined;
+      // A symlink, a FIFO or device, or an oversized file where a record should be: not a valid record.
+      if (code === 'ELOOP' || code === 'EINVAL' || code === 'EFBIG') return undefined;
       this.fail(e, path);
     } finally {
       this.native.closeDir(fd);
@@ -109,7 +136,7 @@ export class RealCloneFs implements CloneFs {
       for (const e of entries) {
         const p = `${dir}/${e.name}`;
         if (e.kind === 'dir') walk(p);
-        else out.push(p); // files, and anything odd (a symlink) so the inventory shows it
+        else out.push(p); // files, and anything odd (a symlink, a FIFO) so the inventory shows it
       }
     };
     walk(RECORDS_ROOT);
@@ -117,7 +144,7 @@ export class RealCloneFs implements CloneFs {
   }
 
   openDir(dir: string): DirHandle {
-    const fd = this.open(dir, true);
+    const fd = this.openUnder(dir, { create: true, forWrite: true });
     const native = this.native;
     const full = this.options.fullSync;
     let closed = false;
@@ -138,18 +165,11 @@ export class RealCloneFs implements CloneFs {
           this.fail(e, at(name));
         }
       },
-      link: (from, to) => {
+      publish: (from, to) => {
         try {
-          native.linkNoReplace(fd, checkName(from), checkName(to));
+          native.moveNoReplace(fd, checkName(from), fd, checkName(to), full);
         } catch (e) {
           this.fail(e, at(to));
-        }
-      },
-      removeTemp: (name) => {
-        try {
-          native.removeTemp(fd, checkName(name));
-        } catch (e) {
-          this.fail(e, at(name));
         }
       },
       sync: () => {
@@ -168,32 +188,14 @@ export class RealCloneFs implements CloneFs {
     };
   }
 
-  quarantineLink(dir: string, name: string, qName: string): void {
-    const fd = this.open(dir, false);
+  quarantineMove(dir: string, name: string, qName: string): void {
+    const fd = this.openUnder(dir, { create: false, forWrite: true });
     try {
-      const qfd = this.open(`${dir}/quarantine`, true);
+      const qfd = this.openUnder(`${dir}/quarantine`, { create: true, forWrite: true });
       try {
-        this.native.linkInto(fd, checkName(name), qfd, checkName(qName));
-        this.native.fsyncDir(qfd, this.options.fullSync);
+        this.native.moveNoReplace(fd, checkName(name), qfd, checkName(qName), this.options.fullSync);
       } catch (e) {
         this.fail(e, `${dir}/quarantine/${qName}`);
-      } finally {
-        this.native.closeDir(qfd);
-      }
-    } finally {
-      this.native.closeDir(fd);
-    }
-  }
-
-  quarantineRemove(dir: string, name: string, qName: string): void {
-    const fd = this.open(dir, false);
-    try {
-      const qfd = this.open(`${dir}/quarantine`, false);
-      try {
-        this.native.removeQuarantined(fd, checkName(name), qfd, checkName(qName));
-        this.native.fsyncDir(fd, this.options.fullSync);
-      } catch (e) {
-        this.fail(e, `${dir}/${name}`);
       } finally {
         this.native.closeDir(qfd);
       }

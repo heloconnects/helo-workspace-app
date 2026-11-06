@@ -20,6 +20,10 @@ export interface Folder {
   readonly files: Record<string, string>;
   /** Where records are written. Simulated folders get an in-memory SimFs. */
   clone?: CloneFs;
+  /** Real folders: the folder's identity (device:inode) as it is now, or null if it cannot be opened. */
+  identity?(): string | null;
+  /** Real folders: the registered identity and business that every write is checked against, on the write's own handle. */
+  expect?(identity: string | null, business: Business): void;
 }
 
 export interface SimFolder extends Folder {

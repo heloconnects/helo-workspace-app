@@ -39,16 +39,16 @@ describe('outside reviews (F4)', () => {
     expect(fs.read(`${dir}/1-chatgpt-${date}.md`)).toBe('someone else');
   });
 
-  it('recovers a crash after the hard link but before the temporary file is removed', () => {
+  it('recovers a crash after the no-replace move, before the database records it', () => {
     const { ws, t, fs, dir } = setup();
-    ws.hooks.arm('outside:linked');
+    ws.hooks.arm('outside:moved');
     expect(() => ws.saveOutsideReview({ taskId: t.id, source: 'chatgpt', text: 'Made-up.' })).toThrow(SimulatedCrash);
-    ws.crash('outside:linked');
+    ws.crash('outside:moved');
     ws.recover();
     const save = ws.t.outsideSaves[0]!;
     expect(save.state).toBe('published');
-    expect(fs.list(`${dir}/.tmp-`)).toEqual([]);
-    expect(fs.list(`${dir}/quarantine/`)).toHaveLength(1);
+    expect(fs.list(`${dir}/.tmp-`)).toEqual([]); // the move leaves no temporary file
+    expect(fs.list(`${dir}/quarantine/`)).toEqual([]);
   });
 
   it('recovers a crash before the link as "not saved" and asks for the paste again', () => {
@@ -88,13 +88,13 @@ describe('outside reviews (F4)', () => {
 
   it('survives a crash during the quarantine move and repeats it safely', () => {
     const { ws, t, fs, dir } = setup();
-    ws.hooks.arm('outside:linked');
+    ws.hooks.arm('outside:tmp-written');
     expect(() => ws.saveOutsideReview({ taskId: t.id, source: 'chatgpt', text: 'Made-up.' })).toThrow(SimulatedCrash);
-    ws.hooks.arm('quarantine:.tmp:linked');
+    ws.hooks.arm('quarantine:.tmp:moved');
     expect(() => ws.recover()).toThrow(SimulatedCrash);
     ws.recover();
     expect(fs.list(`${dir}/.tmp-`)).toEqual([]);
     expect(fs.list(`${dir}/quarantine/`)).toHaveLength(1);
-    expect(ws.t.outsideSaves[0]!.state).toBe('published');
+    expect(ws.t.outsideSaves[0]!.state).toBe('not_saved');
   });
 });
