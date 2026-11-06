@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { attemptDir } from '../../src/core/records.js';
-import { BOTH, makeTask, makeWorkspace, OK, runToEnd, start, waitFor } from './helpers.js';
+import { BOTH, makeTask, makeWorkspace, OK, runToEnd, start, waitFor, simFolder } from './helpers.js';
 
 describe.each(BOTH)('finding 1 (High): retry after unconfirmed activity (%s drafting)', (drafter) => {
   it('cancellation unconfirmed with a confirmed dispatch → restart → interrupted still requires acknowledgement before a retry', async () => {
@@ -200,7 +200,7 @@ describe('finding 4 (Medium): project identity is rechecked before every write',
     const at = start(ws, t.id);
     await waitFor(() => ws.attempt(at.id).state === 'reviewing' && ws.dispatchStatus(at.id, 'review') === 'confirmed');
     const fs = ws.cloneOf(a.id);
-    ws.folder('folder-a').rulesBusiness = 'fictional-b';
+    simFolder(ws, 'folder-a').rulesBusiness = 'fictional-b';
     const before = fs.snapshot();
     await ws.settled(at.id);
     expect(fs.snapshot()).toEqual(before); // nothing written after the change
@@ -214,7 +214,7 @@ describe('finding 4 (Medium): project identity is rechecked before every write',
     expect(fs.snapshot()).toEqual(before);
     expect(ws.attempt(at.id).state).toBe('failed');
     // Once the folder matches again, the missing final-status.json is published on the next start.
-    ws.folder('folder-a').rulesBusiness = 'fictional-a';
+    simFolder(ws, 'folder-a').rulesBusiness = 'fictional-a';
     ws.recover();
     expect(ws.attempt(at.id).final).toBe(true);
     expect(ws.recordState(at.id)).toEqual({ kind: 'intact' });
@@ -223,7 +223,7 @@ describe('finding 4 (Medium): project identity is rechecked before every write',
   it('a folder path change also blocks writes', async () => {
     const { ws, a } = makeWorkspace();
     const t = makeTask(ws, a.id, 'codex');
-    ws.folder('folder-a').path = '(simulated) somewhere else';
+    simFolder(ws, 'folder-a').path = '(simulated) somewhere else';
     expect(() => start(ws, t.id)).toThrow(/folder path changed/);
     expect(() => ws.saveOutsideReview({ taskId: t.id, source: 'claude-app', text: 'Made-up.' })).toThrow(/folder path changed/);
     expect(ws.cloneOf(a.id).list('')).toEqual([]);
@@ -241,7 +241,7 @@ describe('re-review regression (Medium): a blocked project is still reconciled b
     const dir = attemptDir(t.id, at.id);
     const before = fs.snapshot();
     // 2. The project becomes blocked.
-    ws.folder('folder-a').rulesBusiness = 'fictional-b';
+    simFolder(ws, 'folder-a').rulesBusiness = 'fictional-b';
     // 3. Recovery decides interrupted; the frozen list includes 1-draft.md, and nothing is written.
     ws.recover();
     const fin = ws.attempt(at.id).finalizing!;
@@ -250,7 +250,7 @@ describe('re-review regression (Medium): a blocked project is still reconciled b
     expect(fs.snapshot()).toEqual(before);
     expect(fs.list(`${dir}/.tmp-`)).toHaveLength(1); // the leftover waits for the unblock
     // 4. Unblock and recover: the leftover is quarantined, final-status.json is published.
-    ws.folder('folder-a').rulesBusiness = 'fictional-a';
+    simFolder(ws, 'folder-a').rulesBusiness = 'fictional-a';
     ws.recover();
     expect(fs.list(`${dir}/.tmp-`)).toEqual([]);
     expect(ws.attempt(at.id).final).toBe(true);
@@ -269,11 +269,11 @@ describe('re-review regression (Medium): a blocked project is still reconciled b
     const fs = ws.cloneOf(a.id);
     const dir = attemptDir(t.id, at.id);
     fs.externalWrite(`${dir}/2-review.md`, 'changed while the app was down');
-    ws.folder('folder-a').rulesBusiness = 'fictional-b';
+    simFolder(ws, 'folder-a').rulesBusiness = 'fictional-b';
     ws.recover();
     expect(ws.attempt(at.id).finalizing!.files.map((f) => f.name)).not.toContain('2-review.md');
     expect(fs.read(`${dir}/2-review.md`)).toBe('changed while the app was down'); // not touched while blocked
-    ws.folder('folder-a').rulesBusiness = 'fictional-a';
+    simFolder(ws, 'folder-a').rulesBusiness = 'fictional-a';
     ws.recover();
     expect(fs.exists(`${dir}/2-review.md`)).toBe(false);
     expect(fs.list(`${dir}/quarantine/`).some((p) => p.includes('/quarantine/2-review.md-'))).toBe(true);
@@ -296,11 +296,11 @@ describe('re-review regression (Medium): a blocked project is still reconciled b
     const dir = attemptDir(t.id, at.id);
     fs.externalDelete(`${dir}/final-status.json`);
     fs.externalWrite(`${dir}/final-status.json`, 'null');
-    ws.folder('folder-a').rulesBusiness = 'fictional-b';
+    simFolder(ws, 'folder-a').rulesBusiness = 'fictional-b';
     ws.recover();
     expect(ws.attempt(at.id).state).toBe('interrupted');
     expect(fs.read(`${dir}/final-status.json`)).toBe('null');
-    ws.folder('folder-a').rulesBusiness = 'fictional-a';
+    simFolder(ws, 'folder-a').rulesBusiness = 'fictional-a';
     ws.recover();
     expect(ws.attempt(at.id).final).toBe(true);
     expect(fs.read(`${dir}/final-status.json`)).toBe(ws.attempt(at.id).finalizing!.finalStatusBytes);

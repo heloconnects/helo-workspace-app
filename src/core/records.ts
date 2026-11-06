@@ -13,7 +13,7 @@ import {
 } from '../shared/types.js';
 import { prettyCanonicalJson, sha256 } from './hash.js';
 import type { AttemptRow, RecordFileRow } from './schema.js';
-import type { SimFs } from './sim-store.js';
+import type { CloneFs } from './sim-store.js';
 
 export const FINAL_STATUS = 'final-status.json';
 
@@ -97,12 +97,12 @@ export function finalStatusBytes(input: {
   });
 }
 
-export function quarantinedCopies(fs: SimFs, dir: string, name: string): string[] {
+export function quarantinedCopies(fs: CloneFs, dir: string, name: string): string[] {
   return fs.list(`${dir}/quarantine/${name}-`);
 }
 
 /** Record state, recomputed every time an attempt is shown and on every start. */
-export function computeRecordState(attempt: AttemptRow, fs: SimFs, rows: RecordFileRow[]): RecordState {
+export function computeRecordState(attempt: AttemptRow, fs: CloneFs, rows: RecordFileRow[]): RecordState {
   const fin = attempt.finalizing;
   if (!fin) return { kind: 'running' };
   const dir = attemptDir(attempt.taskId, attempt.id);
@@ -177,7 +177,7 @@ export function classify(path: string): { kind: InventoryKind; attemptId: string
   return { kind: 'record', attemptId, holds: HOLDS[name] ?? 'Unknown file.', flag: HOLDS[name] ? null : 'Not a known record file' };
 }
 
-export function inventoryEntries(fs: SimFs, taskId: string): InventoryEntry[] {
+export function inventoryEntries(fs: CloneFs, taskId: string): InventoryEntry[] {
   return fs.list(`${taskDir(taskId)}/`).map((path) => {
     const c = classify(path);
     return { path, ...c, bytes: Buffer.byteLength(fs.read(path) ?? '', 'utf8') };

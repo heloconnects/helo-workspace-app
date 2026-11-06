@@ -25,12 +25,16 @@
     "vitest": "5.0.5"
   },
   "scripts": {
+    "build:native": "node scripts/build-native.mjs",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json && tsc -p tsconfig.test.json",
     "build:main": "tsc -p tsconfig.node.json",
     "build:renderer": "vite build",
-    "build": "npm run build:main && npm run build:renderer",
+    "build": "npm run build:native && npm run build:main && npm run build:renderer",
     "start": "npm run build && electron .",
+    "showcase": "npm run build && electron . --showcase",
     "smoke": "npm run build && electron . --smoke-test",
-    "test": "vitest run"
-  }
+    "smoke:persist": "npm run build && node scripts/smoke-persist.mjs",
+    "test": "npm run build:native && vitest run"
+  },
+  "gypfile": false
 }

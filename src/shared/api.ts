@@ -7,6 +7,7 @@ import type {
   ConnectionView,
   EventNote,
   InventoryView,
+  ModeView,
   ProjectView,
   Provider,
   ScenarioPreset,
@@ -75,6 +76,9 @@ export interface HeloApi {
   exportArtifacts(input: { taskId: string }): Promise<Result<{ text: string }>>;
   getConnection(): Promise<Result<ConnectionView>>;
   getEvents(): Promise<Result<EventNote[]>>;
+  getMode(): Promise<Result<ModeView>>;
+  /** Persistent mode: opens the system folder picker in the main process. The interface never sends a path. */
+  chooseTestFolder(): Promise<Result<SimFolderView | null>>;
   simulateCrashAndRestart(): Promise<Result<{ recovered: number }>>;
   simulateDamage(input: DamageInput): Promise<Result<AttemptView>>;
 }
@@ -101,6 +105,8 @@ export const API_METHODS = [
   'exportArtifacts',
   'getConnection',
   'getEvents',
+  'getMode',
+  'chooseTestFolder',
   'simulateCrashAndRestart',
   'simulateDamage',
 ] as const satisfies readonly (keyof HeloApi)[];

@@ -45,7 +45,7 @@ export class CrashHooks {
 
 export class SimFsError extends Error {
   constructor(
-    readonly code: 'EEXIST' | 'ENOENT' | 'ENOSPC' | 'EACCES',
+    readonly code: string,
     readonly path: string,
     message: string,
   ) {
@@ -55,15 +55,57 @@ export class SimFsError extends Error {
 }
 
 /**
- * The simulated contents of one clone folder. Paths are relative to the clone
- * root and always built by the app from fixed patterns. Only create-exclusive,
- * no-replace hard link and unlink are offered: there is no rename and no
- * overwrite, matching F3's safe publication.
+ * A folder handle opened once for one publication. All operations are
+ * relative to it (F3): create a new file exclusively, hard-link it to a name
+ * that must not exist, remove the app's own ".tmp-" file, and flush.
  */
-export class SimFs {
-  private files = new Map<string, string>();
-  /** One-shot or persistent write faults keyed by record-file name. */
+export interface DirHandle {
+  createExclusive(name: string, content: string, faultKey?: string): void;
+  link(from: string, to: string): void;
+  removeTemp(name: string): void;
+  sync(): void;
+  close(): void;
+}
+
+/**
+ * One project folder as the engine sees it. Paths are relative to the folder
+ * root and always built by the app from fixed patterns. There is no rename and
+ * no overwrite. Implemented in memory by SimFs and on disk by RealCloneFs.
+ */
+export interface CloneFs {
+  readonly root: string;
+  exists(path: string): boolean;
+  read(path: string): string | undefined;
+  hash(path: string): string | undefined;
+  list(prefix: string): string[];
+  /** Open (creating missing folders) the folder at a relative path, as a handle. */
+  openDir(dir: string): DirHandle;
+  /** Hard-link dir/name to dir/quarantine/qName; fails if qName exists. */
+  quarantineLink(dir: string, name: string, qName: string): void;
+  /** Remove dir/name only if dir/quarantine/qName is the very same file. */
+  quarantineRemove(dir: string, name: string, qName: string): void;
+  /** Simulated write faults (a real disk cannot be filled on demand). */
+  injectFault(recordName: string, code: 'ENOSPC' | 'EACCES', times?: number): void;
+  clearFaults(): void;
+  /** Simulation and test helpers: outside interference with the folder. Only the in-memory folder supports them. */
+  readonly supportsExternalEdits: boolean;
+  externalWrite(path: string, content: string): void;
+  externalDelete(path: string): void;
+  snapshot(): Map<string, string>;
+}
+
+interface SimFile {
+  content: string;
+  /** Stands in for device + inode: hard links share it; any other write gets a new one. */
+  identity: number;
+}
+
+/** The simulated contents of one clone folder, in memory. */
+export class SimFs implements CloneFs {
+  private files = new Map<string, SimFile>();
+  private nextIdentity = 1;
   private faults = new Map<string, { code: 'ENOSPC' | 'EACCES'; remaining: number }>();
+  readonly supportsExternalEdits = true;
 
   constructor(readonly root: string) {}
 
@@ -72,45 +114,65 @@ export class SimFs {
   }
 
   read(path: string): string | undefined {
-    return this.files.get(path);
+    return this.files.get(path)?.content;
   }
 
   hash(path: string): string | undefined {
-    const content = this.files.get(path);
-    return content === undefined ? undefined : sha256(content);
+    const f = this.files.get(path);
+    return f === undefined ? undefined : sha256(f.content);
   }
 
   list(prefix: string): string[] {
     return [...this.files.keys()].filter((p) => p.startsWith(prefix)).sort();
   }
 
-  /** Create a new file; fails if the name exists. */
-  createExclusive(path: string, content: string, faultKey?: string): void {
-    if (faultKey !== undefined) {
-      const fault = this.faults.get(faultKey);
-      if (fault && fault.remaining !== 0) {
-        if (fault.remaining > 0) fault.remaining -= 1;
-        const msg = fault.code === 'ENOSPC' ? 'no space left on device (simulated)' : 'permission denied (simulated)';
-        throw new SimFsError(fault.code, path, msg);
-      }
-    }
-    if (this.files.has(path)) throw new SimFsError('EEXIST', path, 'file already exists');
-    this.files.set(path, content);
+  openDir(dir: string): DirHandle {
+    const at = (name: string) => `${dir}/${checkName(name)}`;
+    return {
+      createExclusive: (name, content, faultKey) => {
+        const path = at(name);
+        if (faultKey !== undefined) {
+          const fault = this.faults.get(faultKey);
+          if (fault && fault.remaining !== 0) {
+            if (fault.remaining > 0) fault.remaining -= 1;
+            const msg = fault.code === 'ENOSPC' ? 'no space left on device (simulated)' : 'permission denied (simulated)';
+            throw new SimFsError(fault.code, path, msg);
+          }
+        }
+        if (this.files.has(path)) throw new SimFsError('EEXIST', path, 'file already exists');
+        this.files.set(path, { content, identity: this.nextIdentity++ });
+      },
+      link: (from, to) => this.linkPaths(at(from), at(to)),
+      removeTemp: (name) => {
+        if (!name.startsWith('.tmp-')) throw new SimFsError('EPERM', at(name), 'only the app\'s own .tmp- files can be removed');
+        if (!this.files.delete(at(name))) throw new SimFsError('ENOENT', at(name), 'no such file');
+      },
+      sync: () => undefined,
+      close: () => undefined,
+    };
   }
 
-  /** Hard link: fails if the destination exists. Never replaces anything. */
-  link(from: string, to: string): void {
-    const content = this.files.get(from);
-    if (content === undefined) throw new SimFsError('ENOENT', from, 'source missing');
+  quarantineLink(dir: string, name: string, qName: string): void {
+    this.linkPaths(`${dir}/${checkName(name)}`, `${dir}/quarantine/${checkName(qName)}`);
+  }
+
+  quarantineRemove(dir: string, name: string, qName: string): void {
+    const src = `${dir}/${checkName(name)}`;
+    const q = `${dir}/quarantine/${checkName(qName)}`;
+    const a = this.files.get(src);
+    const b = this.files.get(q);
+    if (!a) throw new SimFsError('ENOENT', src, 'no such file');
+    if (!b || a.identity !== b.identity) throw new SimFsError('EPERM', src, 'the quarantine copy is not the same file; nothing removed');
+    this.files.delete(src);
+  }
+
+  private linkPaths(from: string, to: string): void {
+    const f = this.files.get(from);
+    if (f === undefined) throw new SimFsError('ENOENT', from, 'source missing');
     if (this.files.has(to)) throw new SimFsError('EEXIST', to, 'collision: destination name already exists');
-    this.files.set(to, content);
+    this.files.set(to, f);
   }
 
-  unlink(path: string): void {
-    if (!this.files.delete(path)) throw new SimFsError('ENOENT', path, 'no such file');
-  }
-
-  /** Simulation and test helpers: outside interference with the clone. */
   injectFault(recordName: string, code: 'ENOSPC' | 'EACCES', times = -1): void {
     this.faults.set(recordName, { code, remaining: times });
   }
@@ -120,7 +182,7 @@ export class SimFs {
   }
 
   externalWrite(path: string, content: string): void {
-    this.files.set(path, content);
+    this.files.set(path, { content, identity: this.nextIdentity++ });
   }
 
   externalDelete(path: string): void {
@@ -128,8 +190,22 @@ export class SimFs {
   }
 
   snapshot(): Map<string, string> {
-    return new Map(this.files);
+    return new Map([...this.files].map(([k, v]) => [k, v.content]));
   }
+}
+
+/** A single path component chosen by the app: never empty, ".", "..", or containing "/" or NUL. */
+export function checkName(name: string): string {
+  if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\0') || name.length > 255) {
+    throw new SimFsError('EINVAL', name, 'invalid file or folder name');
+  }
+  return name;
+}
+
+/** The run-state store as the engine sees it: SimDb in memory, SqliteDb on disk. */
+export interface DbLike<T extends object> {
+  readonly tables: Readonly<T>;
+  transact<R>(label: string, fn: (draft: T) => R): R;
 }
 
 /**
@@ -137,7 +213,7 @@ export class SimFs {
  * transaction runs on a copy and is swapped in whole, so a crash before or
  * after it leaves either all or none of it.
  */
-export class SimDb<T extends object> {
+export class SimDb<T extends object> implements DbLike<T> {
   private data: T;
 
   constructor(

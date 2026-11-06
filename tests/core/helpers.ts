@@ -1,5 +1,5 @@
 import { Workspace, type EngineTiming } from '../../src/core/engine.js';
-import { scenarioById } from '../../src/core/fixtures.js';
+import { scenarioById, type SimFolder } from '../../src/core/fixtures.js';
 import { CrashHooks } from '../../src/core/sim-store.js';
 import type { Provider, Scenario } from '../../src/shared/types.js';
 
@@ -49,3 +49,10 @@ export async function waitFor(cond: () => boolean, ms = 3000) {
 }
 
 export const BOTH: Provider[] = ['claude', 'codex'];
+
+/** A simulated folder, writable so tests can change its path or RULES.md business line. */
+export function simFolder(ws: Workspace, id: string): SimFolder {
+  const f = ws.folder(id);
+  if (f.kind !== 'simulated') throw new Error('not a simulated folder');
+  return f as SimFolder;
+}

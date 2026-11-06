@@ -1,15 +1,22 @@
-// Electron main process for the simulated v1. Fake adapters only: nothing
-// here starts a provider program, opens a network connection or reads files
-// outside the built app.
+// Electron main process. Fake adapters only: nothing here starts a provider
+// program or opens a network connection.
+//
+// Two modes:
+//   persistent (default): run state in a SQLite store in the app data folder;
+//     task records written as files, through the safe_publish native helper,
+//     into a fictional test folder Ahmed chooses.
+//   showcase (--showcase): the in-memory simulation with example tasks.
 
-import { app, BrowserWindow, ipcMain, protocol, session, type IpcMainInvokeEvent, type WebContents } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, protocol, session, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { readFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { API_METHODS, IPC_CHANGED_CHANNEL, IPC_CHANNEL_PREFIX } from '../shared/api.js';
 import { SIMULATION_BANNER } from '../shared/types.js';
 import { UI_TIMING, Workspace } from '../core/engine.js';
-import { seedWorkspace } from '../core/seed.js';
+import { seedWorkspace, SEED_TIMING } from '../core/seed.js';
 import { Service } from '../core/service.js';
+import { addTestFolder, openPersistentWorkspace } from '../persist/index.js';
 import {
   APP_ENTRY,
   APP_SCHEME,
@@ -23,6 +30,10 @@ import {
 } from './security.js';
 
 const SMOKE = process.argv.includes('--smoke-test');
+const SMOKE_PERSIST = process.argv.includes('--smoke-persist');
+const SHOWCASE = process.argv.includes('--showcase') || SMOKE;
+const MODE: 'showcase' | 'persistent' = SHOWCASE ? 'showcase' : 'persistent';
+const APP_ROOT = path.join(__dirname, '..', '..');
 const RENDERER_ROOT = path.join(__dirname, '..', 'renderer');
 const PRELOAD = path.join(__dirname, '..', 'preload', 'preload.js');
 
@@ -30,6 +41,12 @@ const PRELOAD = path.join(__dirname, '..', 'preload', 'preload.js');
 if (app.commandLine.hasSwitch('remote-debugging-port') || app.commandLine.hasSwitch('inspect')) {
   console.error('Refusing to start with remote debugging enabled.');
   app.exit(1);
+}
+
+// Persistent mode: only one copy of the app may use the run-state store at a time.
+if (MODE === 'persistent' && !SMOKE_PERSIST && !app.requestSingleInstanceLock()) {
+  console.error('Helo Workspace is already running.');
+  app.exit(0);
 }
 
 app.enableSandbox();
@@ -99,8 +116,8 @@ async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
-    title: `Helo Workspace — ${SIMULATION_BANNER}`,
-    show: !SMOKE,
+    title: `Helo Workspace (${MODE}) — ${SIMULATION_BANNER}`,
+    show: !SMOKE && !SMOKE_PERSIST,
     webPreferences: webPreferences(PRELOAD, !app.isPackaged && process.env.HELO_DEVTOOLS === '1'),
   });
   mainWindow.on('page-title-updated', (e) => e.preventDefault());
@@ -175,18 +192,100 @@ async function smokeTest(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
-  workspace = new Workspace({
-    timing: UI_TIMING,
+  const onCrash = () => setTimeout(() => workspace.restartIfCrashed(), 300);
+  if (MODE === 'showcase') {
     // A simulated crash restarts the (simulated) app straight away: recovery runs over the durable records.
-    onCrash: () => setTimeout(() => workspace.restartIfCrashed(), 300),
-  });
-  service = new Service(workspace);
-  await seedWorkspace(workspace);
+    workspace = new Workspace({ timing: UI_TIMING, onCrash });
+    service = new Service(workspace, { mode: 'showcase' });
+    await seedWorkspace(workspace);
+  } else {
+    // The persistent smoke test uses its own temporary data folder; the app otherwise uses its own data folder.
+    const dataDir = SMOKE_PERSIST && process.env.HELO_DATA_DIR ? process.env.HELO_DATA_DIR : app.getPath('userData');
+    workspace = openPersistentWorkspace({ dataDir, timing: UI_TIMING, fullSync: true, onCrash }).ws;
+    // Every start: recovery (F3). Anything still running when the app last stopped becomes interrupted.
+    workspace.recover();
+    const guards = { appRoot: APP_ROOT, home: os.homedir() };
+    service = new Service(workspace, {
+      mode: 'persistent',
+      dataDir,
+      pickFolder: async () => {
+        const r = await dialog.showOpenDialog(mainWindow!, {
+          title: 'Choose a fictional test folder (never a real repository)',
+          properties: ['openDirectory', 'createDirectory'],
+        });
+        return r.canceled || !r.filePaths[0] ? null : r.filePaths[0];
+      },
+      addFolder: (chosen) => addTestFolder(workspace, chosen, guards, true),
+    });
+  }
   hardenSession();
   registerIpc();
   await createWindow();
   if (SMOKE) await smokeTest();
+  if (SMOKE_PERSIST) await smokePersist();
 });
+
+/**
+ * Persistent smoke test, run by scripts/smoke-persist.mjs in two launches.
+ * Phase "run": register the temporary test folder, complete one attempt, start a second
+ * and quit while it is still reviewing. Phase "verify": after the relaunch (and its
+ * recovery), report what survived.
+ */
+async function smokePersist(): Promise<void> {
+  const phase = process.env.HELO_SMOKE_PHASE;
+  const folder = process.env.HELO_TEST_FOLDER ?? '';
+  const ws = workspace;
+  const report: Record<string, unknown> = { phase, electron: process.versions.electron };
+  if (phase === 'run') {
+    ws.setTiming({ ...SEED_TIMING, lateResultMs: 60_000, stageTimeoutMs: 60_000 });
+    const folderId = addTestFolder(ws, folder, { appRoot: APP_ROOT, home: os.homedir() }, true);
+    const p = ws.registerProject({ folderId, business: 'fictional-a', name: 'Smoke test folder', repoConfirmed: true });
+    const mk = (title: string, scenarioId: string, review: 'ok' | 'late-result-after-cancel') =>
+      ws.createTask({
+        projectId: p.id,
+        title,
+        brief: 'Example brief for a made-up smoke-test task.',
+        acceptanceCriteria: ['Example criterion'],
+        sourceIds: [],
+        drafter: 'claude',
+        scenarioId,
+        scenario: { draft: 'ok', review, synthesis: 'ok' },
+      });
+    const done = mk('Smoke: completes', 'success-issues', 'ok');
+    const a = ws.startAttempt({ taskId: done.id, approvedPacketHash: done.packetHash, idempotencyKey: 'smoke-a', acknowledgePriorStopped: false });
+    await ws.settled(a.id);
+    const running = mk('Smoke: quit while reviewing', 'slow-review', 'late-result-after-cancel');
+    const b = ws.startAttempt({ taskId: running.id, approvedPacketHash: running.packetHash, idempotencyKey: 'smoke-b', acknowledgePriorStopped: false });
+    while (!(ws.attempt(b.id).state === 'reviewing' && ws.dispatchStatus(b.id, 'review') === 'confirmed')) await new Promise((r) => setTimeout(r, 5));
+    Object.assign(report, {
+      attemptA: a.id,
+      stateA: ws.attempt(a.id).state,
+      attemptB: b.id,
+      stateB: ws.attempt(b.id).state,
+      filesA: ws.cloneOf(p.id).list(`app-records/${done.id}/${a.id}/`).map((x) => x.split('/').pop()),
+    });
+    console.log('SMOKE-PERSIST ' + JSON.stringify(report));
+    app.exit(0); // quit while attempt B is still running
+    return;
+  }
+  // verify
+  await new Promise((r) => setTimeout(r, 1000));
+  const page = await mainWindow!.webContents.executeJavaScript(`({
+    banner: document.body.innerText.includes(${JSON.stringify(SIMULATION_BANNER)}),
+    persistentNote: document.body.innerText.includes('Persistent mode'),
+    projectRows: document.querySelectorAll('[data-testid="project-row"]').length,
+  })`);
+  const attempts = ws.t.attempts.map((x) => ({
+    id: x.id,
+    state: x.state,
+    final: x.final,
+    record: ws.recordState(x.id).kind,
+    unresolved: ws.unresolvedStages(x.id),
+  }));
+  Object.assign(report, { page, projects: ws.t.projects.length, tasks: ws.t.tasks.length, attempts });
+  console.log('SMOKE-PERSIST ' + JSON.stringify(report));
+  app.exit(0);
+}
 
 app.on('web-contents-created', (_e, contents) => hardenContents(contents));
 app.on('window-all-closed', () => app.quit());

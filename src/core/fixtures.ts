@@ -2,14 +2,42 @@
 // plainly fictional; none of it is business content.
 
 import type { Business, Scenario, ScenarioPreset } from '../shared/types.js';
+import type { CloneFs } from './sim-store.js';
 
-export interface SimFolder {
+/**
+ * A project folder. Simulated folders are plain objects held in memory; a
+ * real test folder (src/persist/real-folder.ts) re-reads its path and RULES.md
+ * from disk every time these are read.
+ */
+export interface Folder {
   id: string;
-  /** Display path only. Nothing on the real disk is read or written. */
+  kind: 'simulated' | 'real';
+  /** Current resolved path (simulated: a display path only). */
+  readonly path: string;
+  /** Business named on RULES.md's "Business in this repository" line; null when RULES.md is missing or names none. */
+  readonly rulesBusiness: Business | null;
+  /** Readable files: RULES.md plus selectable context sources. */
+  readonly files: Record<string, string>;
+  /** Where records are written. Simulated folders get an in-memory SimFs. */
+  clone?: CloneFs;
+}
+
+export interface SimFolder extends Folder {
+  kind: 'simulated';
   path: string;
-  /** null means the folder has no RULES.md at its top level. */
   rulesBusiness: Business | null;
   files: Record<string, string>;
+}
+
+/** Parse the business named on RULES.md's "Business in this repository" line. */
+export function businessFromRules(text: string | undefined): Business | null {
+  if (text === undefined) return null;
+  const m = /^Business in this repository:\s*(.+?)\s*$/m.exec(text);
+  if (!m) return null;
+  const label = m[1]!;
+  if (label === 'Example Business A (fictional)') return 'fictional-a';
+  if (label === 'Example Business B (fictional)') return 'fictional-b';
+  return null;
 }
 
 function rules(business: string): string {
@@ -42,6 +70,7 @@ export function simFolders(): SimFolder[] {
   return [
     {
       id: 'folder-a',
+      kind: 'simulated',
       path: '(simulated) ~/Desktop/Helo-Shared/example-project-a',
       rulesBusiness: 'fictional-a',
       files: {
@@ -52,6 +81,7 @@ export function simFolders(): SimFolder[] {
     },
     {
       id: 'folder-b',
+      kind: 'simulated',
       path: '(simulated) ~/Desktop/Helo-Shared/example-project-b',
       rulesBusiness: 'fictional-b',
       files: {
@@ -61,6 +91,7 @@ export function simFolders(): SimFolder[] {
     },
     {
       id: 'folder-c',
+      kind: 'simulated',
       path: '(simulated) ~/Desktop/Helo-Shared/example-project-c',
       rulesBusiness: 'fictional-a',
       files: {
@@ -70,6 +101,7 @@ export function simFolders(): SimFolder[] {
     },
     {
       id: 'folder-d',
+      kind: 'simulated',
       path: '(simulated) ~/Desktop/Helo-Shared/example-folder-without-rules',
       rulesBusiness: null,
       files: { 'notes/example-notes.md': notes('folder D') },

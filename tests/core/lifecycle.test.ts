@@ -139,11 +139,16 @@ describe.each(BOTH)('lifecycle with %s drafting', (drafter) => {
     const { ws, a } = makeWorkspace();
     const t = makeTask(ws, a.id, drafter);
     const fs = ws.cloneOf(a.id);
-    // Another process creates the destination name before the app publishes it.
-    const orig = fs.createExclusive.bind(fs);
-    fs.createExclusive = (path: string, content: string, key?: string) => {
-      orig(path, content, key);
-      if (key === '1-draft.md') fs.externalWrite(path.replace(/\.tmp-[^/]+$/, '1-draft.md'), 'someone else wrote this');
+    // Another process creates the destination name after the temporary file was made.
+    const openDir = fs.openDir.bind(fs);
+    fs.openDir = (dir: string) => {
+      const h = openDir(dir);
+      const create = h.createExclusive.bind(h);
+      h.createExclusive = (name: string, content: string, key?: string) => {
+        create(name, content, key);
+        if (key === '1-draft.md') fs.externalWrite(`${dir}/1-draft.md`, 'someone else wrote this');
+      };
+      return h;
     };
     const at = await runToEnd(ws, t.id);
     expect(at.state).toBe('failed');

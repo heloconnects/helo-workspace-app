@@ -182,10 +182,25 @@ describe('recovery details', () => {
     fs.externalWrite(`${dir}/quarantine/file.md-w1-2`, 'more other content');
     fs.externalWrite(`${dir}/file.md`, 'mine');
     expect(ws.quarantine(fs, dir, 'file.md', 'w1')).toBe(`${dir}/quarantine/file.md-w1-3`);
-    // Repeat after a crash between link and removal: same content already there, only the old name is removed.
-    fs.externalWrite(`${dir}/file.md`, 'mine');
-    expect(ws.quarantine(fs, dir, 'file.md', 'w1')).toBe(`${dir}/quarantine/file.md-w1-3`);
     expect(fs.exists(`${dir}/file.md`)).toBe(false);
+    // The same content written again is a different file: it is not removed on the strength of the
+    // earlier copy, and goes to the next free name instead (nothing is lost).
+    fs.externalWrite(`${dir}/file.md`, 'mine');
+    expect(ws.quarantine(fs, dir, 'file.md', 'w1')).toBe(`${dir}/quarantine/file.md-w1-4`);
+  });
+
+  it('repeats a quarantine move after a crash between the link and the removal', () => {
+    const { ws, a, hooks } = makeWorkspace();
+    const fs = ws.cloneOf(a.id);
+    const dir = 'app-records/t-x/a-x';
+    fs.externalWrite(`${dir}/file.md`, 'mine');
+    hooks.arm('quarantine:file.md:linked');
+    expect(() => ws.quarantine(fs, dir, 'file.md', 'w1')).toThrow(SimulatedCrash);
+    expect(fs.exists(`${dir}/file.md`)).toBe(true);
+    // The quarantine copy is the very same file, so only the old name is removed.
+    expect(ws.quarantine(fs, dir, 'file.md', 'w1')).toBe(`${dir}/quarantine/file.md-w1`);
+    expect(fs.exists(`${dir}/file.md`)).toBe(false);
+    expect(fs.list(`${dir}/quarantine/`)).toEqual([`${dir}/quarantine/file.md-w1`]);
   });
 
   it('rule (b): adopts a consistent published final-status.json when the database has no outcome', async () => {

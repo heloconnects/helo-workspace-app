@@ -311,6 +311,13 @@ export interface ConnectionView {
   note: string;
 }
 
+export interface ModeView {
+  mode: 'showcase' | 'persistent';
+  /** Persistent mode: where the run-state store lives (the app's own data folder). */
+  dataDir: string | null;
+  note: string;
+}
+
 export interface EventNote {
   at: string;
   text: string;

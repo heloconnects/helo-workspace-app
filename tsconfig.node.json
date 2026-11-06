@@ -14,5 +14,5 @@
     "rootDir": "src",
     "types": ["node"]
   },
-  "include": ["src/shared/**/*.ts", "src/core/**/*.ts", "src/main/**/*.ts", "src/preload/**/*.ts"]
+  "include": ["src/shared/**/*.ts", "src/core/**/*.ts", "src/persist/**/*.ts", "src/main/**/*.ts", "src/preload/**/*.ts"]
 }

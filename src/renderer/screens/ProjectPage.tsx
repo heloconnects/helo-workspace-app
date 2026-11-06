@@ -128,6 +128,9 @@ function Composer({ projectId, sources, go }: { projectId: string; sources: { so
         </label>
         <fieldset>
           <legend>Context files from this project&apos;s folder (explicitly selected; frozen when the task is created)</legend>
+          {sources.length === 0 && (
+            <p className="muted">No selectable context files. (Importing files from a real test folder is not part of persistence v1.) RULES.md is always included.</p>
+          )}
           {sources.map((s) => (
             <label key={s.sourceId} className="check">
               <input

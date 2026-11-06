@@ -103,6 +103,8 @@ export function ProjectList({ go }: { go: Go }) {
 function RegisterForm({ onError }: { onError: (e: string | null) => void }) {
   const api = useApi();
   const folders = useLoad((a) => a.listSimFolders(), []);
+  const mode = useLoad((a) => a.getMode(), []);
+  const persistent = mode.data?.mode === 'persistent';
   const [folderId, setFolderId] = useState('folder-c');
   const [business, setBusiness] = useState<Business>('fictional-a');
   const [name, setName] = useState('');
@@ -113,8 +115,31 @@ function RegisterForm({ onError }: { onError: (e: string | null) => void }) {
     <Section
       title="Register a project"
       id="register"
-      note="Pick a (simulated) clone folder and its business. The folder needs a RULES.md whose “Business in this repository” line matches. One project per folder and one project per business."
+      note={
+        persistent
+          ? 'Choose a fictional test folder you created for this. Never a real repository. It needs a RULES.md whose “Business in this repository” line names Example Business A (fictional) or Example Business B (fictional). The app writes only inside its app-records/ folder.'
+          : 'Pick a (simulated) clone folder and its business. The folder needs a RULES.md whose “Business in this repository” line matches. One project per folder and one project per business.'
+      }
     >
+      {persistent && (
+        <div className="actions">
+          <button
+            type="button"
+            onClick={async () => {
+              const r = await api.chooseTestFolder();
+              if (!r.ok) onError(r.error);
+              else if (r.value) {
+                onError(null);
+                setFolderId(r.value.id);
+                if (r.value.rulesBusiness) setBusiness(r.value.rulesBusiness);
+                await folders.reload();
+              }
+            }}
+          >
+            Choose test folder…
+          </button>
+        </div>
+      )}
       <form
         className="form"
         onSubmit={async (e) => {
@@ -132,8 +157,9 @@ function RegisterForm({ onError }: { onError: (e: string | null) => void }) {
         }}
       >
         <label>
-          Folder (simulated)
+          {persistent ? 'Test folder' : 'Folder (simulated)'}
           <select value={folderId} onChange={(e) => setFolderId(e.target.value)}>
+            {persistent && !folders.data?.some((f) => f.id === folderId) && <option value="">Choose a test folder first</option>}
             {folders.data?.map((f) => (
               <option key={f.id} value={f.id}>
                 {f.path} {f.rulesBusiness ? `— RULES.md: ${BUSINESS_LABEL[f.rulesBusiness]}` : '— no RULES.md'}

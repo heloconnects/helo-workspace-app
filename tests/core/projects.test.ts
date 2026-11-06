@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { Workspace } from '../../src/core/engine.js';
 import { Service } from '../../src/core/service.js';
-import { FAST, makeTask, makeWorkspace, runToEnd, start } from './helpers.js';
+import { FAST, makeTask, makeWorkspace, runToEnd, start, simFolder } from './helpers.js';
 
 describe('F2 projects', () => {
   it('refuses a second project for the same folder or the same business, a RULES.md mismatch, and a missing RULES.md', () => {
@@ -21,7 +21,7 @@ describe('F2 projects', () => {
   it('blocks a project whose RULES.md business line changed, until it is registered again', () => {
     const { ws, a } = makeWorkspace();
     const t = makeTask(ws, a.id, 'claude');
-    ws.folder('folder-a').rulesBusiness = 'fictional-b';
+    simFolder(ws, 'folder-a').rulesBusiness = 'fictional-b';
     expect(ws.projectBlock(a.id)).toMatch(/no longer matches/);
     expect(() => start(ws, t.id)).toThrow(/no longer matches/);
     expect(() => makeTask(ws, a.id, 'claude')).toThrow(/no longer matches/);

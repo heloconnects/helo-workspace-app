@@ -50,21 +50,64 @@ describe('source boundaries', () => {
     }
   });
 
-  it('reads files only in the main process, and only the built renderer', () => {
+  it('never writes with node:fs; reads only the built renderer (main) and resolves the test folder path (real-folder)', () => {
+    const allowed: Record<string, string[]> = {
+      [path.join('src', 'main', 'main.ts')]: ['readFile'],
+      [path.join('src', 'persist', 'real-folder.ts')]: ['lstatSync', 'realpathSync'],
+    };
     for (const f of SRC) {
+      const rel = path.relative(ROOT, f);
       const text = read(f);
-      const usesFs = /from ['"](node:)?fs(\/promises)?['"]/.test(text);
-      if (usesFs) expect(path.relative(ROOT, f)).toBe(path.join('src', 'main', 'main.ts'));
+      const imports = [...text.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"](?:node:)?fs(?:\/promises)?['"]/g)];
+      const anyFs = /from ['"](node:)?fs(\/promises)?['"]|require\(['"](node:)?fs/.test(text);
+      if (!allowed[rel]) {
+        expect(anyFs, `${rel} must not use node:fs`).toBe(false);
+        continue;
+      }
+      const names = imports.flatMap((m) => m[1]!.split(',').map((x) => x.trim()).filter(Boolean));
+      expect(names.sort(), rel).toEqual([...allowed[rel]!].sort());
+      expect(text, rel).not.toMatch(/\b(writeFile|appendFile|mkdir|rmSync|unlink|rename|copyFile|symlink|truncate|chmod|createWriteStream)\w*\(/);
     }
-    const main = read(path.join(ROOT, 'src/main/main.ts'));
-    expect(main).toMatch(/readFile\(resolved\.file\)/);
-    expect(main).not.toMatch(/writeFile|appendFile|mkdir|rm\(|unlink/);
   });
 
-  it('never references the real business folders or repositories', () => {
+  it('never references the real business folders or repositories, except to refuse them', () => {
+    const guard = path.join('src', 'persist', 'real-folder.ts');
     for (const f of SRC) {
+      const rel = path.relative(ROOT, f);
+      for (const line of read(f).split('\n')) {
+        if (!/helo-walkup|helo-hoe|Desktop\/Helo\/|'Desktop', 'Helo'/.test(line)) continue;
+        expect(rel, line).toBe(guard);
+        expect(line, line).toMatch(/Refused|p === 'helo-walkup'|path\.join\(home, 'Desktop', 'Helo'\)/);
+      }
+    }
+  });
+
+  it('the native helper offers only the F3 operations (no rename, overwrite, truncate, process or network calls)', () => {
+    // Code only: comments removed, so wording in comments cannot hide or fake a match.
+    const c = read(path.join(ROOT, 'src/native/safe_publish.c'))
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+    for (const re of [/\brename(at)?\s*\(/, /O_TRUNC/, /\bunlink\s*\(/, /\bremove\s*\(/, /\brmdir\s*\(/, /\bsystem\s*\(/, /\bexec[lv]p?e?\s*\(/, /\bfork\s*\(/, /\bsocket\s*\(/, /\bconnect\s*\(/, /\bsymlink(at)?\s*\(/, /\bchmod\s*\(/]) {
+      expect(c, String(re)).not.toMatch(re);
+    }
+    // unlinkat: cleanup of the helper's own new file (2), removeTemp (1), removeQuarantined (1).
+    expect(c.match(/\bunlinkat\s*\(/g)).toHaveLength(4);
+    expect(c).toMatch(/O_CREAT \| O_EXCL \| O_NOFOLLOW/);
+    expect(c).toMatch(/O_NOFOLLOW_ANY/);
+    expect(c).toMatch(/strncmp\(name, "\.tmp-", 5\) != 0/);
+    expect(c).toMatch(/a\.st_dev != b\.st_dev \|\| a\.st_ino != b\.st_ino/);
+    const exported = [...c.matchAll(/\{"(\w+)", NULL,/g)].map((m) => m[1]);
+    expect(exported).toEqual(['openDir', 'closeDir', 'createExclusive', 'linkNoReplace', 'linkInto', 'removeTemp', 'removeQuarantined', 'fsyncDir', 'readFile', 'listDir']);
+  });
+
+  it('only the main process and the persistence layer load the native helper; the interface never does', () => {
+    for (const f of SRC) {
+      const rel = path.relative(ROOT, f);
       const text = read(f);
-      expect(text).not.toMatch(/helo-walkup|helo-hoe|Desktop\/Helo\//);
+      if (/safe_publish\.node|loadSafePublish|persist\/native/.test(text)) {
+        expect(rel.startsWith(path.join('src', 'persist')) || rel === path.join('src', 'main', 'main.ts'), rel).toBe(true);
+      }
+      if (rel.startsWith(path.join('src', 'renderer'))) expect(text, rel).not.toMatch(/persist\//);
     }
   });
 

@@ -1,0 +1,63 @@
+
+> helo-workspace-app@0.1.0 build
+> npm run build:native && npm run build:main && npm run build:renderer
+
+
+> helo-workspace-app@0.1.0 build:native
+> node scripts/build-native.mjs
+
+build-native: using node-gyp at /Users/ahmedelhelaly/.nvm/versions/node/v24.21.0/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js
+build-native: using local headers at /Users/ahmedelhelaly/.nvm/versions/node/v24.21.0 (--nodedir, no download)
+gyp info it worked if it ends with ok
+gyp info using node-gyp@12.4.0
+gyp info using node@24.21.0 | darwin | x64
+gyp info find Python using Python version 3.13.5 found at "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"
+gyp info spawn /Library/Frameworks/Python.framework/Versions/3.13/bin/python3
+gyp info spawn args [
+gyp info spawn args '/Users/ahmedelhelaly/.nvm/versions/node/v24.21.0/lib/node_modules/npm/node_modules/node-gyp/gyp/gyp_main.py',
+gyp info spawn args 'binding.gyp',
+gyp info spawn args '-f',
+gyp info spawn args 'make',
+gyp info spawn args '-I',
+gyp info spawn args '/Users/ahmedelhelaly/Desktop/Helo-Shared/helo-workspace-app/build/config.gypi',
+gyp info spawn args '-I',
+gyp info spawn args '/Users/ahmedelhelaly/.nvm/versions/node/v24.21.0/lib/node_modules/npm/node_modules/node-gyp/addon.gypi',
+gyp info spawn args '-I',
+gyp info spawn args '/Users/ahmedelhelaly/.nvm/versions/node/v24.21.0/include/node/common.gypi',
+gyp info spawn args '-Dlibrary=shared_library',
+gyp info spawn args '-Dvisibility=default',
+gyp info spawn args '-Dnode_root_dir=/Users/ahmedelhelaly/.nvm/versions/node/v24.21.0',
+gyp info spawn args '-Dnode_gyp_dir=/Users/ahmedelhelaly/.nvm/versions/node/v24.21.0/lib/node_modules/npm/node_modules/node-gyp',
+gyp info spawn args '-Dnode_lib_file=/Users/ahmedelhelaly/.nvm/versions/node/v24.21.0/$(Configuration)/node.lib',
+gyp info spawn args '-Dmodule_root_dir=/Users/ahmedelhelaly/Desktop/Helo-Shared/helo-workspace-app',
+gyp info spawn args '-Dnode_engine=v8',
+gyp info spawn args '--depth=.',
+gyp info spawn args '--no-parallel',
+gyp info spawn args '--generator-output',
+gyp info spawn args 'build',
+gyp info spawn args '-Goutput_dir=.'
+gyp info spawn args ]
+gyp info spawn make
+gyp info spawn args [ 'BUILDTYPE=Release', '-C', 'build' ]
+  CC(target) Release/obj.target/safe_publish/src/native/safe_publish.o
+  SOLINK_MODULE(target) Release/safe_publish.node
+gyp info ok 
+
+> helo-workspace-app@0.1.0 build:main
+> tsc -p tsconfig.node.json
+
+
+> helo-workspace-app@0.1.0 build:renderer
+> vite build
+
+vite v8.3.5 building client environment for production...
+transforming...
+✓ 23 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/renderer/index.html                   0.67 kB │ gzip:  0.39 kB
+dist/renderer/assets/index-CjfMUSiT.css    5.71 kB │ gzip:  1.83 kB
+dist/renderer/assets/index-DOZmbdiY.js   250.76 kB │ gzip: 76.78 kB
+
+✓ built in 273ms
+exit: 0

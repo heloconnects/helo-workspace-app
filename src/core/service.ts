@@ -10,6 +10,8 @@ import {
   type Business,
   type ConnectionView,
   type InventoryView,
+  type ModeView,
+  type SimFolderView,
   type ProjectView,
   type Provider,
   type StageView,
@@ -78,8 +80,20 @@ function strList(o: Record<string, unknown>, k: string, maxItems: number, maxLen
 const PROVIDERS: readonly Provider[] = ['claude', 'codex'];
 const BUSINESSES: readonly Business[] = ['fictional-a', 'fictional-b'];
 
+export interface ServiceOptions {
+  mode: 'showcase' | 'persistent';
+  dataDir?: string;
+  /** Main process only: shows the system folder picker. */
+  pickFolder?: () => Promise<string | null>;
+  /** Main process only: checks a chosen folder and adds it; returns its folder id. */
+  addFolder?: (path: string) => string;
+}
+
 export class Service implements HeloApi {
-  constructor(readonly ws: Workspace) {}
+  constructor(
+    readonly ws: Workspace,
+    readonly options: ServiceOptions = { mode: 'showcase' },
+  ) {}
 
   /** Entry point for IPC: method name from the allow-list, one untrusted argument. */
   async dispatch(method: string, arg: unknown): Promise<Result<unknown>> {
@@ -218,15 +232,45 @@ export class Service implements HeloApi {
 
   // ---------- operations ----------
 
+  private folderView(id: string): SimFolderView {
+    const f = this.ws.folder(id);
+    return {
+      id: f.id,
+      path: f.path,
+      rulesBusiness: f.rulesBusiness,
+      files: Object.entries(f.files).map(([path, c]) => ({ path, bytes: byteLength(c) })),
+    };
+  }
+
   listSimFolders() {
-    return this.wrap(() =>
-      this.ws.folders.map((f) => ({
-        id: f.id,
-        path: f.path,
-        rulesBusiness: f.rulesBusiness,
-        files: Object.entries(f.files).map(([path, c]) => ({ path, bytes: byteLength(c) })),
-      })),
+    return this.wrap(() => this.ws.folders.map((f) => this.folderView(f.id)));
+  }
+
+  getMode() {
+    return this.wrap(
+      (): ModeView =>
+        this.options.mode === 'persistent'
+          ? {
+              mode: 'persistent',
+              dataDir: this.options.dataDir ?? null,
+              note: 'Persistent mode: task records are written as files into the fictional test folder you choose, and run state is kept in a SQLite store in the app data folder. Adapters are still fake.',
+            }
+          : { mode: 'showcase', dataDir: null, note: 'Showcase mode: everything is in memory and fictional, and is gone when the app closes.' },
     );
+  }
+
+  async chooseTestFolder(): Promise<Result<SimFolderView | null>> {
+    const { pickFolder, addFolder } = this.options;
+    if (!pickFolder || !addFolder) return { ok: false, error: 'Choosing a real folder is only available in persistent mode.' };
+    const chosen = await pickFolder();
+    if (chosen === null) return { ok: true, value: null };
+    try {
+      const id = addFolder(chosen);
+      this.ws.note(`Test folder chosen: ${chosen}`);
+      return { ok: true, value: this.folderView(id) };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
   }
 
   listScenarios() {

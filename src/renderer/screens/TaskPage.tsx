@@ -373,6 +373,8 @@ function SimulationControls({ t }: { t: TaskView }) {
   const [mode, setMode] = useState<'delete' | 'alter'>('delete');
   const [msg, setMsg] = useState<string | null>(null);
   const last = t.attempts[t.attempts.length - 1];
+  const modeView = useLoad((a) => a.getMode(), []);
+  const persistent = modeView.data?.mode === 'persistent';
   return (
     <Section title="Simulation controls" id="sim" note="These exist only in the simulation, to show recovery and record states.">
       <div className="actions">
@@ -386,7 +388,14 @@ function SimulationControls({ t }: { t: TaskView }) {
           Simulate app crash and restart
         </button>
       </div>
-      {last && (
+      {persistent && (
+        <p className="muted">
+          In persistent mode the app never changes its own records. To see a damaged record, change or delete a file under this task&apos;s
+          app-records/ folder yourself (for example in Finder): the record state is checked every time the task is shown and on every start. Quitting
+          the app while an attempt runs is a real crash test.
+        </p>
+      )}
+      {last && !persistent && (
         <form
           className="form inline"
           onSubmit={async (e) => {

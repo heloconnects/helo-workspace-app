@@ -29,6 +29,8 @@ const PRELOAD_METHODS = [
   'exportArtifacts',
   'getConnection',
   'getEvents',
+  'getMode',
+  'chooseTestFolder',
   'simulateCrashAndRestart',
   'simulateDamage',
 ] as const;

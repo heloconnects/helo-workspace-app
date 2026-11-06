@@ -498,3 +498,16 @@ legend {
     grid-template-columns: 1fr;
   }
 }
+
+.modeline {
+  margin: 0;
+  padding: 6px 24px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.modeline.mode-persistent strong {
+  color: var(--accent);
+}

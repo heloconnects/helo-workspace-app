@@ -14,7 +14,7 @@ import {
   type StageName,
 } from '../shared/types.js';
 import { FakeAdapter, type AdapterEvent, type AdapterTiming } from './fake-adapters.js';
-import { simFolders, type SimFolder } from './fixtures.js';
+import { simFolders, type Folder } from './fixtures.js';
 import { byteLength, newId, sha256 } from './hash.js';
 import {
   artifactHash,
@@ -30,7 +30,7 @@ import {
   type SourceSnapshot,
 } from './packet.js';
 import { ALL_RECORD_FILES, attemptDir, computeRecordState, FINAL_STATUS, fileListIsConsistent, finalStatusBytes, taskDir } from './records.js';
-import { CrashHooks, SimDb, SimFs, SimFsError, SimulatedCrash } from './sim-store.js';
+import { CrashHooks, SimDb, SimFs, SimFsError, SimulatedCrash, type CloneFs, type DbLike, type DirHandle } from './sim-store.js';
 import { emptyTables, type AttemptRow, type FinalizingRecord, type OutsideSaveRow, type Tables, type TaskRow } from './schema.js';
 import { assertTransition, isActive, isTerminal } from './state-machine.js';
 import { validateStage, type ReviewOutput, type StageOutput, type SynthesisOutput } from './validation.js';
@@ -81,14 +81,20 @@ export interface WorkspaceOptions {
   now?: () => Date;
   /** Called after a simulated crash has stopped the runtime (the UI restarts automatically). */
   onCrash?: (point: string) => void;
+  /** Run-state store. Default: in-memory SimDb. Persistent mode passes a SQLite store. */
+  db?: (hooks: CrashHooks) => DbLike<Tables>;
+  /** Project folders. Default: the fictional simulated folders. */
+  folders?: Folder[];
+  /** Re-creates a real test folder for a project loaded from the store. */
+  realFolder?: (path: string) => Folder;
 }
 
 export class Workspace {
   readonly hooks: CrashHooks;
-  readonly db: SimDb<Tables>;
-  readonly folders: SimFolder[];
-  /** One simulated clone per folder. */
-  readonly clones = new Map<string, SimFs>();
+  readonly db: DbLike<Tables>;
+  readonly folders: Folder[];
+  /** Where each folder's records are written, by folder id. */
+  readonly clones = new Map<string, CloneFs>();
   readonly adapters: Record<Provider, FakeAdapter>;
   readonly events: { at: string; text: string }[] = [];
   private epoch = 0;
@@ -99,9 +105,16 @@ export class Workspace {
 
   constructor(readonly options: WorkspaceOptions) {
     this.hooks = options.hooks ?? new CrashHooks();
-    this.db = new SimDb(emptyTables(), this.hooks);
-    this.folders = simFolders();
-    for (const f of this.folders) this.clones.set(f.id, new SimFs(f.path));
+    this.db = options.db ? options.db(this.hooks) : new SimDb(emptyTables(), this.hooks);
+    this.folders = [];
+    for (const f of options.folders ?? simFolders()) this.addFolder(f);
+    // Projects loaded from a persistent store that live in real test folders.
+    for (const p of this.db.tables.projects) {
+      if (p.folderId.startsWith('real:') && !this.folders.some((f) => f.id === p.folderId)) {
+        if (!options.realFolder) throw new Error('A stored project uses a real folder, but no real-folder support was given.');
+        this.addFolder(options.realFolder(p.folderPath));
+      }
+    }
     this.adapters = { claude: new FakeAdapter('claude', () => this.options.timing), codex: new FakeAdapter('codex', () => this.options.timing) };
   }
 
@@ -133,13 +146,22 @@ export class Workspace {
     return this.db.tables;
   }
 
-  folder(id: string): SimFolder {
+  /** Add a folder (a real test folder chosen by Ahmed, or one reloaded for a stored project). */
+  addFolder(f: Folder): Folder {
+    const existing = this.folders.find((x) => x.id === f.id);
+    if (existing) return existing;
+    this.folders.push(f);
+    this.clones.set(f.id, f.clone ?? new SimFs(f.path));
+    return f;
+  }
+
+  folder(id: string): Folder {
     const f = this.folders.find((x) => x.id === id);
     if (!f) throw new UserError('Unknown folder.');
     return f;
   }
 
-  cloneOf(projectId: string): SimFs {
+  cloneOf(projectId: string): CloneFs {
     const p = this.project(projectId);
     return this.clones.get(p.folderId)!;
   }
@@ -456,7 +478,7 @@ export class Workspace {
    * name, which fails if the name exists; the temporary file is removed;
    * (3) transaction records it as published.
    */
-  private publishRecord(fs: SimFs, dir: string, attemptId: string, name: string, content: string, handle: RunHandle | null): { ok: true } | { ok: false; error: string } {
+  private publishRecord(fs: CloneFs, dir: string, attemptId: string, name: string, content: string, handle: RunHandle | null): { ok: true } | { ok: false; error: string } {
     if (handle) this.alive(handle);
     // F2: re-check the folder path and RULES.md business line before every write.
     const block = this.projectBlock(this.attempt(attemptId).projectId);
@@ -467,18 +489,31 @@ export class Workspace {
       d.recordFiles = d.recordFiles.filter((r) => !(r.attemptId === attemptId && r.name === name));
       d.recordFiles.push({ attemptId, name, writeId, plannedHash, state: 'intended', error: null });
     });
-    const tmp = `${dir}/.tmp-${writeId}`;
+    const tmpName = `.tmp-${writeId}`;
     const final = `${dir}/${name}`;
+    // One folder handle for the whole publication: every step is relative to it.
+    let dh: DirHandle | null = null;
     try {
-      fs.createExclusive(tmp, content, name);
+      dh = fs.openDir(dir);
+      dh.createExclusive(tmpName, content, name);
       this.hooks.point(`publish:${name}:tmp-written`);
-      fs.link(tmp, final);
+      dh.link(tmpName, name);
       this.hooks.point(`publish:${name}:linked`);
-      fs.unlink(tmp);
+      dh.removeTemp(tmpName);
+      dh.sync();
       this.hooks.point(`publish:${name}:tmp-removed`);
     } catch (e) {
-      if (!(e instanceof SimFsError)) throw e;
-      if (fs.exists(tmp)) fs.unlink(tmp);
+      if (!(e instanceof SimFsError)) {
+        dh?.close();
+        throw e;
+      }
+      try {
+        dh?.removeTemp(tmpName); // our own temporary file, if it was created
+      } catch {
+        /* it was not created */
+      }
+      dh?.close();
+      dh = null;
       const error = e.code === 'EEXIST' ? `collision: ${final} already exists; nothing was replaced` : e.message;
       this.db.transact(`not-published:${name}`, (d) => {
         const r = d.recordFiles.find((x) => x.attemptId === attemptId && x.name === name)!;
@@ -487,6 +522,7 @@ export class Workspace {
       });
       return { ok: false, error };
     }
+    dh?.close();
     this.db.transact(`published:${name}`, (d) => {
       d.recordFiles.find((x) => x.attemptId === attemptId && x.name === name)!.state = 'published';
     });
@@ -881,7 +917,7 @@ export class Workspace {
   }
 
   /** The F2 block reason for the project that owns this clone, or null. */
-  private blockedClone(fs: SimFs): string | null {
+  private blockedClone(fs: CloneFs): string | null {
     const p = this.t.projects.find((x) => this.clones.get(x.folderId) === fs);
     return p ? this.projectBlock(p.id) : null;
   }
@@ -937,32 +973,39 @@ export class Workspace {
   }
 
   /** F3 safe quarantine move: no-replace link to quarantine/<name>-<write-id>(-n), then remove the old name. Repeatable. */
-  quarantine(fs: SimFs, dir: string, name: string, writeId: string): string {
+  quarantine(fs: CloneFs, dir: string, name: string, writeId: string): string {
     // F2: a quarantine move is a write; never write into a project that is blocked.
     if (this.blockedClone(fs)) return '';
-    const src = `${dir}/${name}`;
-    const content = fs.read(src);
+    const content = fs.read(`${dir}/${name}`);
     if (content === undefined) return '';
-    const base = `${dir}/quarantine/${name}-${writeId}`;
+    const base = `${name}-${writeId}`;
     const hash = sha256(content);
     const label = name.startsWith('.tmp-') ? '.tmp' : name; // stable crash-point name
     for (let n = 1; n <= 100; n++) {
-      const dest = n === 1 ? base : `${base}-${n}`;
-      const existing = fs.hash(dest);
+      const qName = n === 1 ? base : `${base}-${n}`;
+      const existing = fs.hash(`${dir}/quarantine/${qName}`);
       if (existing === hash) {
-        fs.unlink(src);
-        this.hooks.point(`quarantine:${label}:old-removed`);
-        return dest;
+        // Repeat after a crash between link and removal: remove the old name only if the
+        // quarantine copy is the very same file. Same content but a different file: try the next name.
+        try {
+          fs.quarantineRemove(dir, name, qName);
+          this.hooks.point(`quarantine:${label}:old-removed`);
+          return `${dir}/quarantine/${qName}`;
+        } catch (e) {
+          if (e instanceof SimFsError && e.code === 'EPERM') continue;
+          throw e;
+        }
       }
       if (existing !== undefined) continue;
-      fs.link(src, dest);
+      fs.quarantineLink(dir, name, qName);
       this.hooks.point(`quarantine:${label}:linked`);
-      fs.unlink(src);
+      fs.quarantineRemove(dir, name, qName);
       this.hooks.point(`quarantine:${label}:old-removed`);
-      return dest;
+      return `${dir}/quarantine/${qName}`;
     }
     throw new Error('quarantine: too many name collisions');
   }
+
 
   /** Returns true when the attempt was marked interrupted by this call. */
   private settleOutcome(attemptId: string): boolean {
@@ -1074,31 +1117,37 @@ export class Workspace {
     this.db.transact('outside:intended', (d) => {
       d.outsideSaves.push({ saveId, taskId: task.id, projectId: task.projectId, source: input.source, textHash: sha256(content), content, date, number, state: 'intended', damaged: null });
     });
-    const tmp = `${dir}/.tmp-${saveId}`;
-    fs.createExclusive(tmp, content);
-    this.hooks.point('outside:tmp-written');
-    for (let tries = 0; ; tries++) {
-      if (tries >= 100) {
-        fs.unlink(tmp);
-        this.db.transact('outside:not-saved', (d) => {
-          d.outsideSaves.find((s) => s.saveId === saveId)!.state = 'not_saved';
-        });
-        throw new UserError('Could not find a free outside-review number after 100 tries.');
+    const tmpName = `.tmp-${saveId}`;
+    const dh = fs.openDir(dir);
+    try {
+      dh.createExclusive(tmpName, content);
+      this.hooks.point('outside:tmp-written');
+      for (let tries = 0; ; tries++) {
+        if (tries >= 100) {
+          dh.removeTemp(tmpName);
+          this.db.transact('outside:not-saved', (d) => {
+            d.outsideSaves.find((s) => s.saveId === saveId)!.state = 'not_saved';
+          });
+          throw new UserError('Could not find a free outside-review number after 100 tries.');
+        }
+        try {
+          dh.link(tmpName, `${number}-${input.source}-${date}.md`);
+          this.hooks.point('outside:linked');
+          break;
+        } catch (e) {
+          if (!(e instanceof SimFsError) || e.code !== 'EEXIST') throw e;
+          number += 1;
+          this.db.transact('outside:renumber', (d) => {
+            d.outsideSaves.find((s) => s.saveId === saveId)!.number = number;
+          });
+        }
       }
-      try {
-        fs.link(tmp, `${dir}/${number}-${input.source}-${date}.md`);
-        this.hooks.point('outside:linked');
-        break;
-      } catch (e) {
-        if (!(e instanceof SimFsError) || e.code !== 'EEXIST') throw e;
-        number += 1;
-        this.db.transact('outside:renumber', (d) => {
-          d.outsideSaves.find((s) => s.saveId === saveId)!.number = number;
-        });
-      }
+      dh.removeTemp(tmpName);
+      dh.sync();
+      this.hooks.point('outside:tmp-removed');
+    } finally {
+      dh.close();
     }
-    fs.unlink(tmp);
-    this.hooks.point('outside:tmp-removed');
     this.db.transact('outside:published', (d) => {
       d.outsideSaves.find((s) => s.saveId === saveId)!.state = 'published';
     });
@@ -1157,6 +1206,9 @@ export class Workspace {
     const a = this.attempt(attemptId);
     if (!(ALL_RECORD_FILES as readonly string[]).includes(file)) throw new UserError('Unknown record file.');
     const fs = this.cloneOf(a.projectId);
+    if (!fs.supportsExternalEdits) {
+      throw new UserError('In persistent mode the app never changes its own records. Edit or delete the file yourself (for example in Finder) to see a damaged record.');
+    }
     const path = `${attemptDir(a.taskId, a.id)}/${file}`;
     if (!fs.exists(path)) throw new UserError('That record file is not on disk.');
     if (mode === 'delete') fs.externalDelete(path);

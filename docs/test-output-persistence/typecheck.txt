@@ -1,0 +1,5 @@
+
+> helo-workspace-app@0.1.0 typecheck
+> tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json && tsc -p tsconfig.test.json
+
+exit: 0

@@ -1,0 +1,15 @@
+SMOKE-PERSIST {"phase":"run","electron":"44.9.3","attemptA":"a-008fe12b14123ff1","stateA":"complete","attemptB":"a-bb630d5872f1f7d7","stateB":"reviewing","filesA":["1-draft-sent.json","1-draft.md","2-review-sent.json","2-review.md","3-synthesis-sent.json","3-synthesis.md","final-status.json","packet.md","sharing-plan.json"]}
+  ok: launch 1: attempt A completed
+  ok: launch 1: attempt A has nine record files
+  ok: launch 1: quit while attempt B was reviewing
+SMOKE-PERSIST {"phase":"verify","electron":"44.9.3","page":{"banner":true,"persistentNote":true,"projectRows":1},"projects":1,"tasks":2,"attempts":[{"id":"a-008fe12b14123ff1","state":"complete","final":true,"record":"intact","unresolved":[]},{"id":"a-bb630d5872f1f7d7","state":"interrupted","final":true,"record":"intact","unresolved":["review"]}]}
+  ok: launch 2: project and both tasks survived the relaunch
+  ok: launch 2: attempt A still complete, record intact
+  ok: launch 2: attempt B interrupted by start-up recovery, record intact
+  ok: launch 2: attempt B review stage marked not confirmed stopped
+  ok: launch 2: window shows the banner, persistent mode and the project
+  ok: SQLite store is in the data folder
+  ok: test folder holds only RULES.md and app-records/
+  ok: RULES.md unchanged
+SMOKE-PERSIST PASSED
+exit: 0

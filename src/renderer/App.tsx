@@ -28,6 +28,7 @@ export function App({ api }: { api: HeloBridge }) {
             </button>
           </nav>
         </header>
+        <ModeLine />
         <main className="content">
           {route.name === 'projects' && <ProjectList go={setRoute} />}
           {route.name === 'project' && <ProjectPage id={route.id} go={setRoute} />}
@@ -37,6 +38,22 @@ export function App({ api }: { api: HeloBridge }) {
         <EventLog />
       </div>
     </ApiContext.Provider>
+  );
+}
+
+function ModeLine() {
+  const { data } = useLoad((api) => api.getMode(), []);
+  if (!data) return null;
+  return (
+    <p className={`modeline mode-${data.mode}`} data-testid="mode-line">
+      <strong>{data.mode === 'persistent' ? 'Persistent mode' : 'Showcase mode'}</strong> — {data.note}
+      {data.dataDir ? (
+        <>
+          {' '}
+          Store: <code>{data.dataDir}</code>
+        </>
+      ) : null}
+    </p>
   );
 }
 
