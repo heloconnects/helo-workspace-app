@@ -163,6 +163,8 @@ export interface ProjectView {
   instructions: string;
   sources: { sourceId: string; path: string; bytes: number }[];
   blocked: string | null;
+  /** A real folder registered by an older version, waiting for Ahmed to confirm it. */
+  identityUnconfirmed: boolean;
   taskCount: number;
 }
 
@@ -225,6 +227,8 @@ export interface AttemptView {
   lateResults: { stage: StageName; note: string }[];
   canCancel: boolean;
   canResolveCancellation: boolean;
+  /** Start-up recovery could not fully check this attempt; it is not settled yet. */
+  recoveryPending: string | null;
   startedAt: string;
   usage: string;
 }

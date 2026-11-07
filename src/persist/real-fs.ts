@@ -26,7 +26,7 @@ export type RootCheck = (rootFd: number) => string | null;
 export class RealCloneFs implements CloneFs {
   readonly supportsExternalEdits = false;
   private readonly native: SafePublish;
-  private faults = new Map<string, { code: 'ENOSPC' | 'EACCES'; remaining: number }>();
+  private faults = new Map<string, { code: 'ENOSPC' | 'EACCES' | 'EIO'; remaining: number }>();
   /** Set when the folder is registered; until then every write is refused. */
   checkRoot: RootCheck = () => 'the folder is not registered as a project';
 
@@ -135,12 +135,25 @@ export class RealCloneFs implements CloneFs {
       }
       for (const e of entries) {
         const p = `${dir}/${e.name}`;
-        if (e.kind === 'dir') walk(p);
-        else out.push(p); // files, and anything odd (a symlink, a FIFO) so the inventory shows it
+        if (e.kind === 'dir') {
+          // Only walk folders on the way to, or inside, the requested prefix, so an unreadable folder
+          // elsewhere (another attempt's) cannot affect this listing.
+          if (prefix.startsWith(`${p}/`) || `${p}/`.startsWith(prefix)) walk(p);
+        } else out.push(p); // files, and anything odd (a symlink, a FIFO) so the inventory shows it
       }
     };
     walk(RECORDS_ROOT);
     return out.filter((p) => p.startsWith(prefix)).sort();
+  }
+
+  /** Throw the injected (simulated) fault for this key, if one is armed. */
+  private fault(key: string | undefined, where: string): void {
+    if (key === undefined) return;
+    const f = this.faults.get(key);
+    if (!f || f.remaining === 0) return;
+    if (f.remaining > 0) f.remaining -= 1;
+    const msg = f.code === 'ENOSPC' ? 'no space left on device (simulated)' : f.code === 'EACCES' ? 'permission denied (simulated)' : 'input/output error (simulated)';
+    throw new SimFsError(f.code, `${this.root}/${where}`, msg);
   }
 
   openDir(dir: string): DirHandle {
@@ -151,28 +164,23 @@ export class RealCloneFs implements CloneFs {
     const at = (name: string) => `${dir}/${name}`;
     return {
       createExclusive: (name, content, faultKey) => {
-        if (faultKey !== undefined) {
-          const fault = this.faults.get(faultKey);
-          if (fault && fault.remaining !== 0) {
-            if (fault.remaining > 0) fault.remaining -= 1;
-            const msg = fault.code === 'ENOSPC' ? 'no space left on device (simulated)' : 'permission denied (simulated)';
-            throw new SimFsError(fault.code, `${this.root}/${at(name)}`, msg);
-          }
-        }
+        this.fault(faultKey, at(name));
         try {
           native.createExclusive(fd, checkName(name), Buffer.from(content, 'utf8'), full);
         } catch (e) {
           this.fail(e, at(name));
         }
       },
-      publish: (from, to) => {
+      publish: (from, to, faultKey) => {
+        this.fault(faultKey === undefined ? undefined : `move:${faultKey}`, at(to));
         try {
-          native.moveNoReplace(fd, checkName(from), fd, checkName(to), full);
+          native.moveNoReplace(fd, checkName(from), fd, checkName(to));
         } catch (e) {
           this.fail(e, at(to));
         }
       },
-      sync: () => {
+      sync: (faultKey) => {
+        this.fault(faultKey === undefined ? undefined : `sync:${faultKey}`, dir);
         try {
           native.fsyncDir(fd, full);
         } catch (e) {
@@ -193,7 +201,7 @@ export class RealCloneFs implements CloneFs {
     try {
       const qfd = this.openUnder(`${dir}/quarantine`, { create: true, forWrite: true });
       try {
-        this.native.moveNoReplace(fd, checkName(name), qfd, checkName(qName), this.options.fullSync);
+        this.native.moveNoReplace(fd, checkName(name), qfd, checkName(qName));
       } catch (e) {
         this.fail(e, `${dir}/quarantine/${qName}`);
       } finally {
@@ -204,8 +212,19 @@ export class RealCloneFs implements CloneFs {
     }
   }
 
-  injectFault(recordName: string, code: 'ENOSPC' | 'EACCES', times = -1): void {
-    this.faults.set(recordName, { code, remaining: times });
+  flush(dir: string): void {
+    const fd = this.openUnder(dir, { create: false, forWrite: true });
+    try {
+      this.native.fsyncDir(fd, this.options.fullSync);
+    } catch (e) {
+      this.fail(e, dir);
+    } finally {
+      this.native.closeDir(fd);
+    }
+  }
+
+  injectFault(key: string, code: 'ENOSPC' | 'EACCES' | 'EIO', times = -1): void {
+    this.faults.set(key, { code, remaining: times });
   }
 
   clearFaults(): void {

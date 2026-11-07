@@ -38,7 +38,8 @@ describe('safe_publish native helper', () => {
     const root = tempDir('n');
     const fd = open(root, ['app-records', 't1', 'a1']);
     n.createExclusive(fd, '.tmp-w1', Buffer.from('hello'), false);
-    n.moveNoReplace(fd, '.tmp-w1', fd, 'packet.md', true); // F_FULLFSYNC path
+    n.moveNoReplace(fd, '.tmp-w1', fd, 'packet.md');
+    n.fsyncDir(fd, true); // F_FULLFSYNC path
     expect(readFileSync(path.join(root, 'app-records/t1/a1/packet.md'), 'utf8')).toBe('hello');
     expect(existsSync(path.join(root, 'app-records/t1/a1/.tmp-w1'))).toBe(false);
     expect(n.readFile(fd, 'packet.md', 100)!.toString()).toBe('hello');
@@ -53,7 +54,7 @@ describe('safe_publish native helper', () => {
     writeFileSync(path.join(root, 'app-records', 'final.md'), 'someone else');
     expect(code(() => n.createExclusive(fd, 'final.md', Buffer.from('mine'), false))).toBe('EEXIST');
     n.createExclusive(fd, '.tmp-x', Buffer.from('mine'), false);
-    expect(code(() => n.moveNoReplace(fd, '.tmp-x', fd, 'final.md', false))).toBe('EEXIST');
+    expect(code(() => n.moveNoReplace(fd, '.tmp-x', fd, 'final.md'))).toBe('EEXIST');
     expect(readFileSync(path.join(root, 'app-records', 'final.md'), 'utf8')).toBe('someone else');
     expect(readFileSync(path.join(root, 'app-records', '.tmp-x'), 'utf8')).toBe('mine'); // nothing deleted
     n.closeDir(fd);
@@ -64,7 +65,7 @@ describe('safe_publish native helper', () => {
     const fd = open(root, ['app-records']);
     n.createExclusive(fd, '.tmp-x', Buffer.from('mine'), false);
     writeFileSync(path.join(root, 'app-records', 'record.md'), 'raced in'); // the other process
-    expect(code(() => n.moveNoReplace(fd, '.tmp-x', fd, 'record.md', false))).toBe('EEXIST');
+    expect(code(() => n.moveNoReplace(fd, '.tmp-x', fd, 'record.md'))).toBe('EEXIST');
     expect(readFileSync(path.join(root, 'app-records', 'record.md'), 'utf8')).toBe('raced in');
     n.closeDir(fd);
   });
@@ -104,7 +105,7 @@ describe('safe_publish native helper', () => {
     writeFileSync(path.join(root, 'RULES.md'), 'impostor');
     const fd = n.openSub(r, ['app-records'], true);
     n.createExclusive(fd, '.tmp-w', Buffer.from('record'), false);
-    n.moveNoReplace(fd, '.tmp-w', fd, 'packet.md', false);
+    n.moveNoReplace(fd, '.tmp-w', fd, 'packet.md');
     n.closeDir(fd);
     n.closeDir(r);
     expect(existsSync(path.join(root, 'app-records'))).toBe(false);
@@ -122,10 +123,26 @@ describe('safe_publish native helper', () => {
     renameSync(path.join(root, 'app-records/t1/a1'), path.join(root, 'app-records/t1/a1-moved'));
     symlinkSync(elsewhere, path.join(root, 'app-records/t1/a1'));
     n.createExclusive(fd, '.tmp-w', Buffer.from('record'), false);
-    n.moveNoReplace(fd, '.tmp-w', fd, 'packet.md', false);
+    n.moveNoReplace(fd, '.tmp-w', fd, 'packet.md');
     n.closeDir(fd);
     expect(existsSync(path.join(elsewhere, 'packet.md'))).toBe(false);
     expect(readFileSync(path.join(root, 'app-records/t1/a1-moved/packet.md'), 'utf8')).toBe('record');
+  });
+
+  it('moves only a regular file: a folder, a symlink or a FIFO at the source name is refused and left where it is', () => {
+    const root = tempDir('n');
+    const fd = open(root, ['d']);
+    mkdirSync(path.join(root, 'd', '.tmp-dir'));
+    writeFileSync(path.join(root, 'd', '.tmp-dir', 'inside.md'), 'x');
+    expect(code(() => n.moveNoReplace(fd, '.tmp-dir', fd, 'packet.md'))).toBe('EINVAL');
+    expect(existsSync(path.join(root, 'd', '.tmp-dir', 'inside.md'))).toBe(true);
+    expect(existsSync(path.join(root, 'd', 'packet.md'))).toBe(false);
+    symlinkSync(tempDir('elsewhere'), path.join(root, 'd', '.tmp-link'));
+    expect(code(() => n.moveNoReplace(fd, '.tmp-link', fd, 'packet.md'))).toBe('ELOOP');
+    execFileSync('mkfifo', [path.join(root, 'd', '.tmp-fifo')]);
+    expect(code(() => n.moveNoReplace(fd, '.tmp-fifo', fd, 'packet.md'))).toBe('EINVAL');
+    expect(existsSync(path.join(root, 'd', 'packet.md'))).toBe(false);
+    n.closeDir(fd);
   });
 
   it('moves into quarantine across two folder handles without replacing anything', () => {
@@ -134,9 +151,9 @@ describe('safe_publish native helper', () => {
     const qfd = open(root, ['d', 'quarantine']);
     writeFileSync(path.join(root, 'd', 'bad.md'), 'content');
     writeFileSync(path.join(root, 'd', 'quarantine', 'taken'), 'earlier copy');
-    expect(code(() => n.moveNoReplace(fd, 'bad.md', qfd, 'taken', false))).toBe('EEXIST');
+    expect(code(() => n.moveNoReplace(fd, 'bad.md', qfd, 'taken'))).toBe('EEXIST');
     expect(readFileSync(path.join(root, 'd', 'quarantine', 'taken'), 'utf8')).toBe('earlier copy');
-    n.moveNoReplace(fd, 'bad.md', qfd, 'bad.md-w1', false);
+    n.moveNoReplace(fd, 'bad.md', qfd, 'bad.md-w1');
     expect(existsSync(path.join(root, 'd', 'bad.md'))).toBe(false);
     expect(readFileSync(path.join(root, 'd', 'quarantine', 'bad.md-w1'), 'utf8')).toBe('content');
     n.closeDir(fd);
@@ -150,7 +167,7 @@ describe('safe_publish native helper', () => {
       expect(code(() => n.openSub(r, [bad], true)), JSON.stringify(bad)).toBe('EINVAL');
     }
     for (const bad of ['..', 'x/y', '']) expect(code(() => n.createExclusive(r, bad, Buffer.from('x'), false))).toBe('EINVAL');
-    expect(code(() => n.moveNoReplace(r, 'a', r, '../b', false))).toBe('EINVAL');
+    expect(code(() => n.moveNoReplace(r, 'a', r, '../b'))).toBe('EINVAL');
     expect(code(() => n.openRoot('relative/path'))).toBe('EINVAL');
     n.closeDir(r);
   });

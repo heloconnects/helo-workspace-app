@@ -59,6 +59,12 @@ export interface AttemptRow {
   finalizing: FinalizingRecord | null;
   final: boolean;
   createdAt: string;
+  /**
+   * Set when start-up recovery could not fully check this attempt's files (for example an
+   * unreadable folder). The attempt is then not settled on a partial picture: it stays waiting,
+   * blocks retry, and recovery tries again on every start. Absent in older stores.
+   */
+  recoveryPending?: string | null;
 }
 
 export type RecordFileState = 'intended' | 'published' | 'not_published';

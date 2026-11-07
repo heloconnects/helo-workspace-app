@@ -4,7 +4,8 @@
 // file and folder, as relaunching the app does.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { attemptDir } from '../../src/core/records.js';
@@ -328,14 +329,146 @@ describe('Codex review of persistence v1: regression tests', () => {
     r.db.close();
   });
 
-  it('finding 1: a failed publication never deletes anything: its own temporary file goes to quarantine, and a pre-existing .tmp- name is left alone', async () => {
-    const s = setup({ ...OK, publishFailure: { file: '1-draft.md', code: 'EACCES' } });
+  it('finding 1: a failed move never deletes anything: the app\'s own temporary file is moved to quarantine', async () => {
+    const s = setup();
+    const fs = s.ws.cloneOf(s.project.id);
+    fs.injectFault('move:1-draft.md', 'EACCES', 1); // the temporary file exists; the move then fails
     const at = start(s.ws, s.task.id);
     await s.ws.settled(at.id);
     expect(s.ws.attempt(at.id).state).toBe('failed');
     const dir = path.join(s.folder, attemptDir(s.task.id, at.id));
     expect(readdirSync(dir).filter((n) => n.startsWith('.tmp-'))).toEqual([]);
+    const q = readdirSync(path.join(dir, 'quarantine'));
+    expect(q).toHaveLength(1);
+    expect(q[0]).toMatch(/^\.tmp-w-/);
+    expect(readFileSync(path.join(dir, 'quarantine', q[0]!), 'utf8')).toContain('1. Draft'); // the content, kept
     s.db.close();
+  });
+
+  it('finding 1: a pre-existing .tmp- name the app did not create is never touched', async () => {
+    const s = setup();
+    const fs = s.ws.cloneOf(s.project.id);
+    let planted = '';
+    const openDir = fs.openDir.bind(fs);
+    fs.openDir = (dir: string) => {
+      const h = openDir(dir);
+      const create = h.createExclusive.bind(h);
+      h.createExclusive = (name: string, content: string, key?: string) => {
+        if (key === 'packet.md') {
+          // Another program created this exact temporary name first.
+          planted = path.join(s.folder, dir, name);
+          writeFileSync(planted, 'not the app\'s file');
+        }
+        create(name, content, key);
+      };
+      return h;
+    };
+    const at = start(s.ws, s.task.id);
+    await s.ws.settled(at.id);
+    expect(s.ws.attempt(at.id).state).toBe('failed');
+    expect(s.ws.attempt(at.id).finalizing?.reason).toMatch(/packet\.md could not be published: collision: .* already exists; nothing was replaced/);
+    expect(readFileSync(planted, 'utf8')).toBe('not the app\'s file');
+    expect(existsSync(path.join(path.dirname(planted), 'quarantine'))).toBe(false);
+    s.db.close();
+  });
+
+  it('new finding 2: a move that succeeds but whose flush fails is still counted as published', async () => {
+    const s = setup();
+    s.ws.cloneOf(s.project.id).injectFault('sync:2-review.md', 'EIO', 1);
+    const at = start(s.ws, s.task.id);
+    await s.ws.settled(at.id);
+    expect(s.ws.attempt(at.id).state).toBe('complete');
+    expect(s.ws.t.recordFiles.find((r) => r.attemptId === at.id && r.name === '2-review.md')!.state).toBe('published');
+    expect(s.ws.recordState(at.id)).toEqual({ kind: 'intact' });
+    expect(s.ws.events.some((e) => /2-review\.md was published, but flushing its folder failed/.test(e.text))).toBe(true);
+    s.db.close();
+  });
+
+  it('new finding 2: recovery adopts a record recorded "not published" whose file is in place with the planned content', async () => {
+    const hooks = new CrashHooks();
+    const s = setup(OK, 'claude', hooks);
+    hooks.arm('publish:1-draft.md:moved');
+    const at = start(s.ws, s.task.id);
+    await s.ws.settled(at.id);
+    // The move happened; the database says "not published" (an acknowledgement that was lost).
+    s.ws.db.transact('test:lost-ack', (d) => {
+      const r = d.recordFiles.find((x) => x.attemptId === at.id && x.name === '1-draft.md')!;
+      r.state = 'not_published';
+      r.error = 'simulated lost acknowledgement';
+    });
+    s.db.close();
+    const r = relaunch(s.data, s.folder);
+    const fin = r.ws.attempt(at.id).finalizing!;
+    expect(fin.outcome).toBe('interrupted');
+    expect(fin.files.map((f) => f.name)).toContain('1-draft.md');
+    unlinkSync(path.join(s.folder, attemptDir(s.task.id, at.id), '1-draft.md'));
+    expect(r.ws.recordState(at.id).kind).toBe('damaged'); // it is required now
+    r.db.close();
+  });
+
+  it('new finding 3: an attempt whose folder cannot be read is not settled on a partial picture; it waits, blocks retry, and settles once readable', async () => {
+    const s = setup({ ...OK, review: 'timeout' });
+    s.ws.setTiming({ responseMs: 1, lateResultMs: 25, stageTimeoutMs: 60_000, attemptLimitMs: 60_000, cancelGraceMs: 15 });
+    const t2 = s.ws.createTask({ projectId: s.project.id, title: 'Other', brief: 'Example.', acceptanceCriteria: ['Example'], sourceIds: [], drafter: 'codex', scenarioId: 'success-issues', scenario: { ...OK, draft: 'timeout' } });
+    const stuck = start(s.ws, s.task.id);
+    const other = start(s.ws, t2.id);
+    await waitFor(() => s.ws.dispatchStatus(stuck.id, 'review') === 'confirmed' && s.ws.dispatchStatus(other.id, 'draft') === 'confirmed');
+    s.ws.crash('quit');
+    s.db.close();
+    const dir = path.join(s.folder, attemptDir(s.task.id, stuck.id));
+    chmodSync(dir, 0o000);
+    try {
+      const r = relaunch(s.data, s.folder);
+      expect(r.ws.attempt(other.id).state).toBe('interrupted'); // the other attempt was recovered
+      const a = r.ws.attempt(stuck.id);
+      expect(a.final).toBe(false);
+      expect(a.finalizing).toBeNull(); // no outcome frozen on a partial picture
+      expect(a.recoveryPending).toMatch(/could not be fully checked/);
+      expect(r.ws.startBlock(s.task.id)).toMatch(/Recovery of attempt 1 is waiting/);
+      expect(new Service(r.ws).attemptView(stuck.id).recoveryPending).toMatch(/could not be fully checked/);
+      r.db.close();
+    } finally {
+      chmodSync(dir, 0o755);
+    }
+    const r2 = relaunch(s.data, s.folder);
+    const a2 = r2.ws.attempt(stuck.id);
+    expect(a2.state).toBe('interrupted');
+    expect(a2.final).toBe(true);
+    expect(a2.recoveryPending ?? null).toBeNull();
+    expect(a2.finalizing!.files.map((f) => f.name)).toEqual(['packet.md', 'sharing-plan.json', '1-draft-sent.json', '1-draft.md', '2-review-sent.json']);
+    expect(r2.ws.recordState(stuck.id)).toEqual({ kind: 'intact' });
+    r2.db.close();
+  });
+
+  it('new finding 4: a store from the first persistence v1 build migrates without losing history, and the folder is confirmed once', async () => {
+    const s = setup();
+    const at = start(s.ws, s.task.id);
+    await s.ws.settled(at.id);
+    s.db.close();
+    // Turn the store back into a schema-1 store: no folderIdentity, version 1 only.
+    const file = path.join(s.data, 'helo-run-state.sqlite');
+    const raw = new DatabaseSync(file);
+    const row = raw.prepare('SELECT key, data FROM projects').get() as { key: string; data: string };
+    const p = JSON.parse(row.data);
+    delete p.folderIdentity;
+    raw.prepare('UPDATE projects SET data = ? WHERE key = ?').run(JSON.stringify(p), row.key);
+    raw.prepare('DELETE FROM schema_migrations WHERE version > 1').run();
+    raw.prepare("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, 'then')").run();
+    raw.close();
+    const r = relaunch(s.data, s.folder);
+    expect(r.db.schemaVersion()).toBe(2);
+    expect(r.ws.attempt(at.id).state).toBe('complete'); // history kept
+    expect(r.ws.projectBlock(r.project.id)).toMatch(/older version of the app/);
+    expect(new Service(r.ws).projectView(r.project.id).identityUnconfirmed).toBe(true);
+    expect(() => r.ws.saveOutsideReview({ taskId: s.task.id, source: 'chatgpt', text: 'Made-up.' })).toThrow(/older version/);
+    r.ws.confirmFolderIdentity(r.project.id);
+    expect(r.ws.projectBlock(r.project.id)).toBeNull();
+    r.ws.saveOutsideReview({ taskId: s.task.id, source: 'chatgpt', text: 'Made-up.' });
+    expect(() => r.ws.confirmFolderIdentity(r.project.id)).toThrow(/already confirmed/);
+    r.db.close();
+    const r2 = relaunch(s.data, s.folder);
+    expect(r2.ws.projectBlock(r2.project.id)).toBeNull();
+    r2.db.close();
   });
 
   it('F4 on real disk: a crash at each outside-review boundary, then a relaunch, leaves a consistent save and no temporary file', async () => {

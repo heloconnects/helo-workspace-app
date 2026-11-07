@@ -4,7 +4,7 @@
 // fresh workspace and runs start-up recovery, as relaunching the app does.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { attemptDir } from '../../src/core/records.js';
@@ -19,8 +19,8 @@ beforeAll(() => {
 }, 120_000);
 afterEach(cleanupTemp);
 
-function child(data: string, folder: string, point: string, drafter: string, scenario: string) {
-  return spawnSync(process.execPath, [CHILD, data, folder, point, drafter, scenario], { cwd: ROOT, encoding: 'utf8', timeout: 30_000 });
+function child(data: string, folder: string, point: string, drafter: string, scenario: string, mode = 'run') {
+  return spawnSync(process.execPath, [CHILD, data, folder, point, drafter, scenario, mode], { cwd: ROOT, encoding: 'utf8', timeout: 30_000 });
 }
 
 const CASES: [string, string, string][] = [
@@ -74,4 +74,70 @@ describe.each(CASES)('SIGKILL at every boundary (%s drafting, %s)', (drafter, sc
     }
     expect(killed).toBeGreaterThan(points.length - 5);
   }, 600_000);
+});
+
+describe('SIGKILL during an outside-review save (F4)', () => {
+  it('relaunch leaves exactly one consistent save state and no temporary file, at every boundary', () => {
+    const listing = child(tempDir('d'), makeTestFolder(), 'list', 'claude', 'success', 'outside');
+    expect(listing.status, listing.stderr).toBe(0);
+    const points: string[] = JSON.parse(listing.stdout);
+    expect(points).toEqual(expect.arrayContaining(['outside:tmp-written', 'outside:moved']));
+    for (const point of points) {
+      const data = tempDir('d');
+      const folder = makeTestFolder();
+      const r = child(data, folder, point, 'claude', 'success', 'outside');
+      expect(r.signal, `${point}: ${r.stdout}${r.stderr}`).toBe('SIGKILL');
+      const o = openWs(data, folder);
+      o.ws.recover();
+      const saves = o.ws.t.outsideSaves;
+      const task = o.ws.t.tasks[0];
+      if (!task) {
+        expect(point).toMatch(/^txn:task-create:/);
+        o.db.close();
+        continue;
+      }
+      const outside = path.join(folder, 'app-records', task.id, 'outside');
+      const files = existsSync(outside) ? readdirSync(outside) : [];
+      expect(files.filter((n) => n.startsWith('.tmp-')), point).toEqual([]);
+      expect(saves.length, point).toBeLessThanOrEqual(1);
+      if (saves[0]?.state === 'published') expect(files.filter((n) => n.endsWith('.md')), point).toHaveLength(1);
+      else expect(files.filter((n) => n.endsWith('.md')), point).toHaveLength(0);
+      if (saves[0]) expect(['published', 'not_saved'], point).toContain(saves[0].state);
+      o.db.close();
+    }
+  }, 300_000);
+});
+
+describe('SIGKILL during start-up recovery itself', () => {
+  it('a second relaunch still gives exactly one outcome, an intact record and no temporary file', () => {
+    // A state that needs real recovery work: killed after 2-review.md's temporary file was written.
+    const prepare = () => {
+      const data = tempDir('d');
+      const folder = makeTestFolder();
+      const r = child(data, folder, 'publish:2-review.md:tmp-written', 'claude', 'success');
+      expect(r.signal).toBe('SIGKILL');
+      return { data, folder };
+    };
+    const probe = prepare();
+    const listing = child(probe.data, probe.folder, 'list', 'claude', 'success', 'recover');
+    expect(listing.status, listing.stderr).toBe(0);
+    const points: string[] = JSON.parse(listing.stdout);
+    expect(points.some((p) => p.startsWith('quarantine:'))).toBe(true);
+    expect(points.some((p) => p.includes('final-status.json'))).toBe(true);
+    for (const q of points) {
+      const { data, folder } = prepare();
+      const r = child(data, folder, q, 'claude', 'success', 'recover');
+      expect(r.signal, `${q}: ${r.stdout}${r.stderr}`).toBe('SIGKILL');
+      const o = openWs(data, folder);
+      o.ws.recover();
+      const a = o.ws.t.attempts[0]!;
+      expect(a.state, q).toBe('interrupted');
+      expect(a.final, q).toBe(true);
+      expect(o.ws.recordState(a.id), q).toEqual({ kind: 'intact' });
+      const dir = path.join(folder, attemptDir(a.taskId, a.id));
+      expect(readdirSync(dir).filter((n) => n.startsWith('.tmp-')), q).toEqual([]);
+      expect(readFileSync(path.join(dir, 'final-status.json'), 'utf8'), q).toBe(a.finalizing!.finalStatusBytes);
+      o.db.close();
+    }
+  }, 300_000);
 });

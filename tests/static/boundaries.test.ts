@@ -90,9 +90,13 @@ describe('source boundaries', () => {
     for (const re of [/\brename(at)?\s*\(/, /\brenamex_np\s*\(/, /O_TRUNC/, /\bunlink(at)?\s*\(/, /\bremove\s*\(/, /\brmdir\s*\(/, /\bsystem\s*\(/, /\bexec[lv]p?e?\s*\(/, /\bfork\s*\(/, /\bsocket\s*\(/, /\bconnect\s*\(/, /\bsymlink(at)?\s*\(/, /\bchmod\s*\(/, /\blink(at)?\s*\(/]) {
       expect(c, String(re)).not.toMatch(re);
     }
-    // Moves only ever use the no-replace flag; there is exactly one.
-    expect(c.match(/\brenameatx_np\s*\(/g)).toHaveLength(1);
+    // Moves only ever use the no-replace flag: the move, and moving a swapped-in entry back.
+    expect(c.match(/\brenameatx_np\s*\(/g)).toHaveLength(2);
+    expect(c.match(/\brenameatx_np\([^)]*MOVE_FLAGS\)/g)).toHaveLength(2);
     expect(c).toMatch(/renameatx_np\(sfd, name, dfd, dest, MOVE_FLAGS\)/);
+    expect(c).toMatch(/renameatx_np\(dfd, dest, sfd, name, MOVE_FLAGS\)/);
+    expect(c).toMatch(/if \(!S_ISREG\(before\.st_mode\)\)/);
+    expect(c).toMatch(/after\.st_dev == before\.st_dev && after\.st_ino == before\.st_ino/);
     expect(c).toMatch(/#define MOVE_FLAGS \(RENAME_EXCL \| RENAME_NOFOLLOW_ANY\)/);
     expect(c).toMatch(/#define MOVE_FLAGS RENAME_EXCL/);
     expect(c).toMatch(/O_CREAT \| O_EXCL \| O_NOFOLLOW/);

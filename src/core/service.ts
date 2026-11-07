@@ -131,6 +131,7 @@ export class Service implements HeloApi {
       instructions: f.files['RULES.md'] ?? '(RULES.md missing)',
       sources: this.ws.sourcesOf(p.id).map((s) => ({ sourceId: s.sourceId, path: s.path, bytes: byteLength(s.content) })),
       blocked: this.ws.projectBlock(p.id),
+      identityUnconfirmed: f.kind === 'real' && !p.folderIdentity,
       taskCount: this.ws.t.tasks.filter((t) => t.projectId === p.id).length,
     };
   }
@@ -177,6 +178,7 @@ export class Service implements HeloApi {
       lateResults: ws.t.lateResults.filter((l) => l.attemptId === a.id).map((l) => ({ stage: l.stage, note: l.note })),
       canCancel: live && a.state !== 'cancelling' && a.state !== 'cancellation_unconfirmed',
       canResolveCancellation: a.state === 'cancellation_unconfirmed',
+      recoveryPending: a.recoveryPending ?? null,
       startedAt: a.createdAt,
       usage: 'Unavailable (the simulated adapters report no usage)',
     };
@@ -306,6 +308,10 @@ export class Service implements HeloApi {
       const o = obj(arg);
       return this.projectView(this.ws.archiveProject(str(o, 'projectId', LIMITS.id), bool(o, 'archived')).id);
     });
+  }
+
+  confirmFolderIdentity(arg: unknown) {
+    return this.wrap(() => this.projectView(this.ws.confirmFolderIdentity(str(obj(arg), 'projectId', LIMITS.id)).id));
   }
 
   deleteProject(arg: unknown) {

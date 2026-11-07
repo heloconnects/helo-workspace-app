@@ -63,6 +63,7 @@ export interface HeloApi {
   renameProject(input: { projectId: string; name: string }): Promise<Result<ProjectView>>;
   archiveProject(input: { projectId: string; archived: boolean }): Promise<Result<ProjectView>>;
   deleteProject(input: { projectId: string }): Promise<Result<{ removed: true }>>;
+  confirmFolderIdentity(input: { projectId: string }): Promise<Result<ProjectView>>;
   listTasks(input: { projectId: string }): Promise<Result<TaskSummary[]>>;
   previewSharing(input: ComposeInput): Promise<Result<SharingPlanView>>;
   createTask(input: ComposeInput): Promise<Result<{ taskId: string }>>;
@@ -92,6 +93,7 @@ export const API_METHODS = [
   'renameProject',
   'archiveProject',
   'deleteProject',
+  'confirmFolderIdentity',
   'listTasks',
   'previewSharing',
   'createTask',

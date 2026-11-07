@@ -11,7 +11,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { emptyTables, type Tables } from '../core/schema.js';
 import type { CrashHooks, DbLike } from '../core/sim-store.js';
 
-export const SCHEMA_VERSION = 1;
+/**
+ * 1: persistence v1 as first built (dbb2fa4).
+ * 2: real projects carry folderIdentity (null when recorded by version 1, to be confirmed by Ahmed).
+ */
+export const SCHEMA_VERSION = 2;
 
 type TableName = keyof Tables;
 
@@ -83,9 +87,22 @@ export class SqliteDb implements DbLike<Tables> {
     if (current === SCHEMA_VERSION) return;
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      for (const t of TABLES) {
-        this.db.exec(`CREATE TABLE IF NOT EXISTS ${t.sql} (seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, owner TEXT, data TEXT NOT NULL)`);
-        this.db.exec(`CREATE INDEX IF NOT EXISTS ${t.sql}_owner ON ${t.sql} (owner)`);
+      if (current === 0) {
+        for (const t of TABLES) {
+          this.db.exec(`CREATE TABLE IF NOT EXISTS ${t.sql} (seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, owner TEXT, data TEXT NOT NULL)`);
+          this.db.exec(`CREATE INDEX IF NOT EXISTS ${t.sql}_owner ON ${t.sql} (owner)`);
+        }
+      }
+      if (current === 1) {
+        // Version 1 stored no folder identity. Mark it explicitly as not yet confirmed; history is kept.
+        const rows = this.db.prepare('SELECT key, data FROM projects').all() as { key: string; data: string }[];
+        for (const r of rows) {
+          const p = JSON.parse(r.data) as Record<string, unknown>;
+          if (!('folderIdentity' in p)) {
+            p.folderIdentity = null;
+            this.db.prepare('UPDATE projects SET data = ? WHERE key = ?').run(JSON.stringify(p), r.key);
+          }
+        }
       }
       this.db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(SCHEMA_VERSION, new Date().toISOString());
       this.db.exec('COMMIT');

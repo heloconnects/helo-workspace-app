@@ -63,6 +63,11 @@ export function ProjectList({ go }: { go: Go }) {
               <td>{p.archived ? 'Archived' : p.blocked ? `Blocked: ${p.blocked}` : 'Active'}</td>
               <td>{p.taskCount}</td>
               <td className="actions">
+                {p.identityUnconfirmed && (
+                  <button type="button" onClick={() => act(api.confirmFolderIdentity({ projectId: p.id }))}>
+                    Confirm folder
+                  </button>
+                )}
                 <button type="button" onClick={() => setRenaming({ id: p.id, name: p.name })}>
                   Rename
                 </button>

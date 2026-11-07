@@ -195,6 +195,7 @@ export class Workspace {
     const p = this.project(projectId);
     const f = this.folder(p.folderId);
     if (f.path !== p.folderPath) return 'The folder path changed since registration. Register the project again.';
+    if (f.kind === 'real' && !p.folderIdentity) return 'This folder was registered by an older version of the app, which did not record its identity. Confirm the folder on the Projects page to continue.';
     if (f.identity && p.folderIdentity && f.identity() !== p.folderIdentity) return 'The folder was replaced by a different folder since registration. Register the project again.';
     if (f.rulesBusiness === null) return 'RULES.md is missing from the folder. Register the project again.';
     if (f.rulesBusiness !== p.business) return 'The RULES.md business line no longer matches. Register the project again.';
@@ -219,6 +220,29 @@ export class Workspace {
     f.expect?.(folderIdentity, input.business);
     this.changed();
     return this.project(id);
+  }
+
+  /**
+   * Older stores (persistence v1 before the Codex review fixes) have real projects without a recorded
+   * folder identity. Ahmed confirms the folder once; it must still pass every check (same path, a
+   * RULES.md naming the same business). Nothing in the folder or the task history is changed.
+   */
+  confirmFolderIdentity(projectId: string) {
+    const p = this.project(projectId);
+    const f = this.folder(p.folderId);
+    if (f.kind !== 'real' || !f.identity || !f.expect) throw new UserError('Only real test folders have an identity to confirm.');
+    if (p.folderIdentity) throw new UserError('This folder is already confirmed.');
+    if (f.path !== p.folderPath) throw new UserError('The folder path changed since registration; it cannot be confirmed.');
+    if (f.rulesBusiness !== p.business) throw new UserError('RULES.md no longer names the registered business; it cannot be confirmed.');
+    const identity = f.identity();
+    if (!identity) throw new UserError('The folder could not be opened safely.');
+    this.db.transact('project-confirm-identity', (d) => {
+      d.projects.find((x) => x.id === projectId)!.folderIdentity = identity;
+    });
+    f.expect(identity, p.business);
+    this.note(`Folder confirmed for ${p.name}: ${p.folderPath}`);
+    this.changed();
+    return this.project(projectId);
   }
 
   renameProject(projectId: string, name: string) {
@@ -349,6 +373,8 @@ export class Workspace {
     const block = this.projectBlock(p.id);
     if (block) return block;
     const attempts = this.attemptsOf(taskId);
+    const pending = attempts.find((a) => a.recoveryPending);
+    if (pending) return `Recovery of attempt ${pending.number} is waiting: ${pending.recoveryPending}. Fix the folder and restart the app.`;
     const unconfirmed = attempts.find((a) => a.state === 'cancellation_unconfirmed');
     if (unconfirmed) return 'Cancellation unconfirmed: resolve the earlier attempt before starting a new one.';
     if (attempts.some((a) => isActive(a.state))) return 'An attempt is already running.';
@@ -504,7 +530,7 @@ export class Workspace {
       dh.createExclusive(tmpName, content, name);
       created = true;
       this.hooks.point(`publish:${name}:tmp-written`);
-      dh.publish(tmpName, name); // no-replace move: fails if the name exists; nothing is deleted
+      dh.publish(tmpName, name, name); // no-replace move of a regular file: fails if the name exists; nothing is deleted
       this.hooks.point(`publish:${name}:moved`);
     } catch (e) {
       dh?.close();
@@ -526,6 +552,19 @@ export class Workspace {
         r.error = error;
       });
       return { ok: false, error };
+    }
+    // The move happened, so the record is published under its final name. The flush is a separate
+    // step: if it fails, the record is still counted as published (it is there), and the problem is
+    // noted rather than being mistaken for "not published".
+    try {
+      dh.sync(name);
+      this.hooks.point(`publish:${name}:synced`);
+    } catch (e) {
+      if (!(e instanceof SimFsError)) {
+        dh.close();
+        throw e;
+      }
+      this.note(`${final} was published, but flushing its folder failed: ${e.message}. It is counted as published; durability after a power loss is not confirmed.`);
     }
     dh.close();
     this.db.transact(`published:${name}`, (d) => {
@@ -900,13 +939,10 @@ export class Workspace {
     this.recovering = true;
     let interrupted = 0;
     try {
-      // One damaged folder must not stop recovery for the others: file errors are noted per attempt.
-      for (const a of this.t.attempts) this.isolated(`reconciling attempt ${a.number}`, () => this.reconcileFiles(a.id));
-      for (const a of this.t.attempts) {
-        this.isolated(`settling attempt ${a.number}`, () => {
-          if (this.settleOutcome(a.id)) interrupted += 1;
-        });
-      }
+      // Each attempt is reconciled and then settled on its own. If its files cannot be fully checked,
+      // it is NOT settled on a partial picture: it is marked "recovery pending" (retry blocked) and
+      // tried again on every start. One damaged folder never stops recovery for the others.
+      for (const a of this.t.attempts) if (this.recoverAttempt(a.id)) interrupted += 1;
       this.isolated('recovering outside reviews', () => this.recoverOutsideSaves());
     } finally {
       this.recovering = false;
@@ -915,6 +951,31 @@ export class Workspace {
     this.note(`Recovery ran: ${interrupted} attempt(s) marked interrupted. No stage was re-run.`);
     this.changed();
     return { interrupted };
+  }
+
+  /** F3 steps 1 and 2 for one attempt. Returns true when it was marked interrupted. */
+  private recoverAttempt(attemptId: string): boolean {
+    try {
+      this.reconcileFiles(attemptId);
+      const interrupted = this.settleOutcome(attemptId);
+      if (this.attempt(attemptId).recoveryPending) {
+        this.db.transact('recovery:pending-cleared', (d) => {
+          d.attempts.find((x) => x.id === attemptId)!.recoveryPending = null;
+        });
+      }
+      return interrupted;
+    } catch (e) {
+      if (!(e instanceof SimFsError)) throw e;
+      const a = this.attempt(attemptId);
+      const reason = `its files could not be fully checked (${e.message})`;
+      if (!a.final) {
+        this.db.transact('recovery:pending', (d) => {
+          d.attempts.find((x) => x.id === attemptId)!.recoveryPending = reason;
+        });
+      }
+      this.note(`Recovery of attempt ${a.number} is waiting: ${reason}. It was not settled on a partial picture; it is tried again on every start.`);
+      return false;
+    }
   }
 
   /** Run one recovery step; a file error (an unreadable or odd entry) is noted and recovery goes on. */
@@ -978,6 +1039,20 @@ export class Workspace {
       // Blocked and mismatched: the row stays "intended" (not published, so never required),
       // and the quarantine move waits until the project is unblocked.
     }
+    // A row recorded "not published" whose file is nevertheless at its final name with the planned
+    // content: the move happened but its acknowledgement was lost. Adopt it before any outcome is
+    // decided, so it is counted (and required). Different content there is someone else's: left alone.
+    if (!a.finalizing) {
+      for (const row of this.t.recordFiles.filter((r) => r.attemptId === a.id && r.state === 'not_published')) {
+        if (fs.hash(`${dir}/${row.name}`) === row.plannedHash) {
+          this.db.transact(`recovery:adopted:${row.name}`, (d) => {
+            const x = d.recordFiles.find((y) => y.attemptId === a.id && y.name === row.name)!;
+            x.state = 'published';
+            x.error = null;
+          });
+        }
+      }
+    }
     if (blocked) return;
     // Records already published: content that no longer matches its recorded hash is moved to
     // quarantine. The row stays "published", so the file stays required and the record state
@@ -1012,6 +1087,13 @@ export class Workspace {
         throw e;
       }
       this.hooks.point(`quarantine:${label}:moved`);
+      try {
+        fs.flush(`${dir}/quarantine`);
+        fs.flush(dir);
+      } catch (e) {
+        if (!(e instanceof SimFsError)) throw e;
+        this.note(`${dir}/${name} was moved to quarantine, but flushing failed: ${e.message}.`);
+      }
       return `${dir}/quarantine/${qName}`;
     }
     throw new Error('quarantine: too many name collisions');
@@ -1152,6 +1234,12 @@ export class Workspace {
             d.outsideSaves.find((s) => s.saveId === saveId)!.number = number;
           });
         }
+      }
+      try {
+        dh.sync();
+      } catch (e) {
+        if (!(e instanceof SimFsError)) throw e;
+        this.note(`The outside review was saved, but flushing its folder failed: ${e.message}.`);
       }
     } finally {
       dh.close();

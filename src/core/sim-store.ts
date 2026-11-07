@@ -69,9 +69,10 @@ export class SimFsError extends Error {
  */
 export interface DirHandle {
   createExclusive(name: string, content: string, faultKey?: string): void;
-  /** No-replace move within this folder (macOS renameatx_np with RENAME_EXCL on real disk). */
-  publish(from: string, to: string): void;
-  sync(): void;
+  /** No-replace move of a regular file within this folder (macOS renameatx_np with RENAME_EXCL on real disk). Does not flush. */
+  publish(from: string, to: string, faultKey?: string): void;
+  /** Flush this folder. Separate from the move, so "moved but not flushed" can be told apart from "not moved". */
+  sync(faultKey?: string): void;
   close(): void;
 }
 
@@ -88,10 +89,16 @@ export interface CloneFs {
   list(prefix: string): string[];
   /** Open (creating missing folders) the folder at a relative path, as a handle. Refused while the project is blocked. */
   openDir(dir: string): DirHandle;
-  /** No-replace move of dir/name to dir/quarantine/qName; fails with EEXIST if qName exists. */
+  /** No-replace move of dir/name to dir/quarantine/qName; fails with EEXIST if qName exists. Does not flush. */
   quarantineMove(dir: string, name: string, qName: string): void;
-  /** Simulated write faults (a real disk cannot be filled on demand). */
-  injectFault(recordName: string, code: 'ENOSPC' | 'EACCES', times?: number): void;
+  /** Flush a folder after a move. */
+  flush(dir: string): void;
+  /**
+   * Simulated faults (a real disk cannot be filled on demand). The key is a record name (fault on
+   * creating its temporary file), "move:<name>" (fault on the move) or "sync:<name>" (fault on the
+   * flush after a successful move).
+   */
+  injectFault(key: string, code: 'ENOSPC' | 'EACCES' | 'EIO', times?: number): void;
   clearFaults(): void;
   /** Simulation and test helpers: outside interference with the folder. Only the in-memory folder supports them. */
   readonly supportsExternalEdits: boolean;
@@ -103,7 +110,7 @@ export interface CloneFs {
 /** The simulated contents of one clone folder, in memory. */
 export class SimFs implements CloneFs {
   private files = new Map<string, string>();
-  private faults = new Map<string, { code: 'ENOSPC' | 'EACCES'; remaining: number }>();
+  private faults = new Map<string, { code: 'ENOSPC' | 'EACCES' | 'EIO'; remaining: number }>();
   readonly supportsExternalEdits = true;
 
   constructor(readonly root: string) {}
@@ -125,30 +132,40 @@ export class SimFs implements CloneFs {
     return [...this.files.keys()].filter((p) => p.startsWith(prefix)).sort();
   }
 
+  /** Throw the injected fault for this key, if one is armed. */
+  fault(key: string | undefined, path: string): void {
+    if (key === undefined) return;
+    const f = this.faults.get(key);
+    if (!f || f.remaining === 0) return;
+    if (f.remaining > 0) f.remaining -= 1;
+    const msg = f.code === 'ENOSPC' ? 'no space left on device (simulated)' : f.code === 'EACCES' ? 'permission denied (simulated)' : 'input/output error (simulated)';
+    throw new SimFsError(f.code, path, msg);
+  }
+
   openDir(dir: string): DirHandle {
     const at = (name: string) => `${dir}/${checkName(name)}`;
     return {
       createExclusive: (name, content, faultKey) => {
         const path = at(name);
-        if (faultKey !== undefined) {
-          const fault = this.faults.get(faultKey);
-          if (fault && fault.remaining !== 0) {
-            if (fault.remaining > 0) fault.remaining -= 1;
-            const msg = fault.code === 'ENOSPC' ? 'no space left on device (simulated)' : 'permission denied (simulated)';
-            throw new SimFsError(fault.code, path, msg);
-          }
-        }
+        this.fault(faultKey, path);
         if (this.files.has(path)) throw new SimFsError('EEXIST', path, 'file already exists');
         this.files.set(path, content);
       },
-      publish: (from, to) => this.move(at(from), at(to)),
-      sync: () => undefined,
+      publish: (from, to, faultKey) => {
+        this.fault(faultKey === undefined ? undefined : `move:${faultKey}`, at(to));
+        this.move(at(from), at(to));
+      },
+      sync: (faultKey) => this.fault(faultKey === undefined ? undefined : `sync:${faultKey}`, dir),
       close: () => undefined,
     };
   }
 
   quarantineMove(dir: string, name: string, qName: string): void {
     this.move(`${dir}/${checkName(name)}`, `${dir}/quarantine/${checkName(qName)}`);
+  }
+
+  flush(): void {
+    /* nothing to flush in memory */
   }
 
   /** Atomic no-replace move. */
@@ -160,8 +177,8 @@ export class SimFs implements CloneFs {
     this.files.set(to, f);
   }
 
-  injectFault(recordName: string, code: 'ENOSPC' | 'EACCES', times = -1): void {
-    this.faults.set(recordName, { code, remaining: times });
+  injectFault(key: string, code: 'ENOSPC' | 'EACCES' | 'EIO', times = -1): void {
+    this.faults.set(key, { code, remaining: times });
   }
 
   clearFaults(): void {

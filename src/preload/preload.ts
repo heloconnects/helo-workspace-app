@@ -16,6 +16,7 @@ const PRELOAD_METHODS = [
   'renameProject',
   'archiveProject',
   'deleteProject',
+  'confirmFolderIdentity',
   'listTasks',
   'previewSharing',
   'createTask',

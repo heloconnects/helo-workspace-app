@@ -14,6 +14,8 @@
 //     O_NOFOLLOW), so the folder that was checked is the folder written to.
 //   - A record is written to a new temporary file (O_CREAT | O_EXCL |
 //     O_NOFOLLOW), flushed, then moved to its final name with RENAME_EXCL.
+//     Only a regular file is ever moved, and the moved entry is verified to be
+//     the very file that was checked; anything swapped in is moved back.
 //   - Newly created folders, and folders whose entries change, are flushed.
 //   - Files are read only after checking they are regular files, opened with
 //     O_NONBLOCK so a FIFO or device put in place of a record cannot hang.
@@ -70,6 +72,7 @@ static const char *errno_code(int e) {
     case EXDEV: return "EXDEV";
     case ENOTSUP: return "ENOTSUP";
     case EAGAIN: return "EAGAIN";
+    case EBUSY: return "EBUSY";
     default: return "EUNKNOWN";
   }
 }
@@ -291,22 +294,52 @@ static napi_value CreateExclusive(napi_env env, napi_callback_info info) {
   return make_undefined(env);
 }
 
-// moveNoReplace(srcFd, name, destFd, destName, fullSync): atomic move that fails with EEXIST if
-// destName exists (renameatx_np RENAME_EXCL). Nothing is replaced and nothing is deleted.
-// Both folders are flushed afterwards.
+// moveNoReplace(srcFd, name, destFd, destName): atomic move that fails with EEXIST if destName
+// exists (renameatx_np RENAME_EXCL). Nothing is replaced and nothing is deleted.
+//
+// Only a regular file is moved. The source is opened first (O_NOFOLLOW | O_NONBLOCK) and must be
+// a regular file; that handle is held across the move. After the move, the entry now at destName
+// must be that very file (same device and inode). If something else was swapped in at the source
+// name in between (a folder, another file), it is moved back to where it was and "ESWAPPED" is
+// reported, so nothing but the checked regular file is ever relocated.
+//
+// The move does not flush. The caller flushes both folders afterwards (fsyncDir), so a crash or a
+// failed flush after a successful move can be told apart from a failed move.
 static napi_value MoveNoReplace(napi_env env, napi_callback_info info) {
-  size_t argc = 5;
-  napi_value argv[5];
+  size_t argc = 4;
+  napi_value argv[4];
   int sfd, dfd;
   char name[MAX_NAME + 2], dest[MAX_NAME + 2];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-  if (argc < 5 || !get_fd(env, argv[0], &sfd) || !get_name(env, argv[1], name) || !get_fd(env, argv[2], &dfd) || !get_name(env, argv[3], dest))
-    return throw_code(env, "EINVAL", "EINVAL: moveNoReplace(srcFd, name, destFd, destName, fullSync)");
-  bool full = false;
-  napi_get_value_bool(env, argv[4], &full);
-  if (renameatx_np(sfd, name, dfd, dest, MOVE_FLAGS) != 0) return throw_errno(env, "move without replacing", dest, errno);
-  if (sync_fd(dfd, full) != 0) return throw_errno(env, "flush folder", dest, errno);
-  if (sfd != dfd && sync_fd(sfd, full) != 0) return throw_errno(env, "flush folder", name, errno);
+  if (argc < 4 || !get_fd(env, argv[0], &sfd) || !get_name(env, argv[1], name) || !get_fd(env, argv[2], &dfd) || !get_name(env, argv[3], dest))
+    return throw_code(env, "EINVAL", "EINVAL: moveNoReplace(srcFd, name, destFd, destName)");
+  int fd = openat(sfd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  if (fd < 0) return throw_errno(env, "open file to move", name, errno);
+  struct stat before;
+  if (fstat(fd, &before) != 0) {
+    int err = errno;
+    close(fd);
+    return throw_errno(env, "check file to move", name, err);
+  }
+  if (!S_ISREG(before.st_mode)) {
+    close(fd);
+    return throw_code(env, "EINVAL", "EINVAL: only regular files are moved");
+  }
+  if (renameatx_np(sfd, name, dfd, dest, MOVE_FLAGS) != 0) {
+    int err = errno;
+    close(fd);
+    return throw_errno(env, "move without replacing", dest, err);
+  }
+  struct stat after;
+  int same = fstatat(dfd, dest, &after, AT_SYMLINK_NOFOLLOW) == 0 && after.st_dev == before.st_dev && after.st_ino == before.st_ino;
+  close(fd);
+  if (!same) {
+    // Something else was swapped in at the source name: put it back, never keep it.
+    if (renameatx_np(dfd, dest, sfd, name, MOVE_FLAGS) == 0) {
+      return throw_code(env, "ESWAPPED", "ESWAPPED: the file changed during the move; the entry that was swapped in was moved back, nothing was published");
+    }
+    return throw_code(env, "ESWAPPED", "ESWAPPED: the file changed during the move and the swapped-in entry could not be moved back; it was left at the destination name (nothing deleted)");
+  }
   return make_undefined(env);
 }
 

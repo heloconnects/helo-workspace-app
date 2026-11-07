@@ -155,6 +155,12 @@ function AttemptCard({ a }: { a: AttemptView }) {
       </p>
       <RecordStateView record={a.recordState} />
       {a.reason && <p className="reason">{a.reason}</p>}
+      {a.recoveryPending && (
+        <p className="warn-box" data-testid="recovery-pending">
+          Recovery is waiting: {a.recoveryPending}. This attempt has not been settled on a partial picture; recovery tries again every time the app
+          starts. Retry is blocked until then.
+        </p>
+      )}
       {a.state === 'cancellation_unconfirmed' && (
         <p className="warn-box">
           Cancellation unconfirmed. Retry is blocked until this is resolved. Local cancellation does not promise that remote generation or billing stopped.

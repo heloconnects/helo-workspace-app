@@ -15,8 +15,8 @@ export interface SafePublish {
   identity(fd: number): string;
   closeDir(fd: number): void;
   createExclusive(fd: number, name: string, data: Buffer, fullSync: boolean): void;
-  /** Atomic no-replace move (renameatx_np RENAME_EXCL); flushes both folders. */
-  moveNoReplace(srcFd: number, name: string, destFd: number, destName: string, fullSync: boolean): void;
+  /** Atomic no-replace move of a regular file only (renameatx_np RENAME_EXCL), verified after; does not flush. */
+  moveNoReplace(srcFd: number, name: string, destFd: number, destName: string): void;
   fsyncDir(fd: number, fullSync: boolean): void;
   readFile(fd: number, name: string, maxBytes: number): Buffer | null;
   listDir(fd: number): { name: string; kind: EntryKind }[];
