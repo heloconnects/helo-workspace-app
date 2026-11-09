@@ -9,6 +9,7 @@ Claude Code session, 2026-11-06 to 2026-11-09, in `~/Desktop/Helo-Shared/helo-wo
 - The second round, of `994b0f6`, confirmed three of those resolved, marked two partly resolved, and found one new High and four new Medium problems.
 - The third round, of `3a5f7ba`, left one High and two Medium issues. They are fixed under the round 3 brief (`docs/Build-Brief-Persistence-v1-Round3-Fixes.md`) and plan revision 9; see "Round 3" in section 6.
 - The fourth round, of `2011fd2` (2026-11-09), resolved two of those and left two Medium gaps in the swap handling and one Low error in this report. Ahmed asked for them to be fixed in this session; see "Round 4" in section 6.
+- The fifth round, of `f71c2e8` (2026-11-09), resolved all three and found no new issues. **Codex's verdict: ready to be accepted as fake-adapters-only**, within plan revision 9's threat model; see "Round 5" in section 6.
 
 Everything raised in the four rounds is fixed in code, with regression tests. C1 is closed: Omar adopted its plan wording in plan revision 8 (see section 5). Two fixes needed Ahmed's decision, and he approved both in chat:
 - F3 publication now uses a no-replace move instead of a hard link plus removal, so the app never deletes anything;
@@ -628,4 +629,22 @@ Ahmed ran the Codex review read-only on 2026-11-09 (`~/Desktop/Helo-Shared/Codex
 
 **What is still detected, not prevented:** as before (see "Round 3"). One case can't be detected at all: if the app is killed between the move and its check, there is no swap record, so a swapped-in file with exactly the planned bytes at the record name looks like the app's own record. A different file, a folder or any other entry there is still never counted as published. Plan revision 9 places a program doing that deliberately outside the threat model.
 
-These round 4 fixes haven't been reviewed by Codex yet; Ahmed runs that next.
+Codex reviewed these round 4 fixes in round 5, below.
+
+### Round 5 (review of `f71c2e8`)
+
+Ahmed ran the Codex review read-only on 2026-11-09 (`~/Desktop/Helo-Shared/Codex-Review-Persistence-Round5.md`).
+
+| Round 4 finding | Codex's status |
+|---|---|
+| 1, Medium: swapped-in content counted as published | RESOLVED |
+| 2, Medium: outside-review swap never reconciled | RESOLVED |
+| 3, Low: C1 wording in this report | RESOLVED |
+
+**New issues: none.** Codex's verdict: persistence v1 is **ready to be accepted as fake-adapters-only**, within plan revision 9's accepted threat model.
+
+Codex noted two things, and neither reopens a finding:
+- It inspected the new tests but didn't run them, as it was asked. The passing results are the ones in section 3 (223 tests and both smoke tests, run on `f71c2e8`).
+- The disclosed limit remains. If the app is killed before a swap is detected, a swapped-in file with exactly the app's bytes can't be told apart from the app's own record (see "Round 4"). It is within the accepted scope.
+
+No code changed after this review. Acceptance itself, and merging `build/persistence-v1`, are Ahmed's decisions; the app runs no git.
