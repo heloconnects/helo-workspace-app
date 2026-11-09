@@ -10,6 +10,7 @@ import {
   type DispatchStatus,
   type Outcome,
   type Provider,
+  type RecordState,
   type Scenario,
   type StageName,
 } from '../shared/types.js';
@@ -30,8 +31,8 @@ import {
   type SourceSnapshot,
 } from './packet.js';
 import { ALL_RECORD_FILES, attemptDir, computeRecordState, FINAL_STATUS, fileListIsConsistent, finalStatusBytes, taskDir } from './records.js';
-import { CrashHooks, SimDb, SimFs, SimFsError, SimulatedCrash, type CloneFs, type DbLike, type DirHandle } from './sim-store.js';
-import { emptyTables, type AttemptRow, type FinalizingRecord, type OutsideSaveRow, type Tables, type TaskRow } from './schema.js';
+import { CrashHooks, SimDb, SimFs, SimFsError, SimulatedCrash, swapKind, type CloneFs, type DbLike, type DirHandle } from './sim-store.js';
+import { emptyTables, type AttemptRow, type FinalizingRecord, type OutsideSaveRow, type SwapBlock, type Tables, type TaskRow } from './schema.js';
 import { assertTransition, isActive, isTerminal } from './state-machine.js';
 import { validateStage, type ReviewOutput, type StageOutput, type SynthesisOutput } from './validation.js';
 
@@ -193,6 +194,7 @@ export class Workspace {
   /** F2 re-check: folder path and RULES.md business line unchanged. Returns a blocking reason or null. */
   projectBlock(projectId: string): string | null {
     const p = this.project(projectId);
+    if (p.swapBlock) return swapBlockMessage(p.swapBlock);
     const f = this.folder(p.folderId);
     if (f.path !== p.folderPath) return 'The folder path changed since registration. Register the project again.';
     if (f.kind === 'real' && !p.folderIdentity) return 'This folder was registered by an older version of the app, which did not record its identity. Confirm the folder on the Projects page to continue.';
@@ -241,6 +243,53 @@ export class Workspace {
     });
     f.expect(identity, p.business);
     this.note(`Folder confirmed for ${p.name}: ${p.folderPath}`);
+    this.changed();
+    return this.project(projectId);
+  }
+
+  /**
+   * Plan revision 9, "block and warn": record that a write detected a swap. The block is kept in
+   * the store, survives restarts, and stops every task and write in the project until Ahmed lifts
+   * it. A block already in place is kept (the first detection is the one shown).
+   */
+  private blockForSwap(d: Tables, projectId: string, block: SwapBlock): void {
+    const p = d.projects.find((x) => x.id === projectId);
+    if (p && !p.swapBlock) p.swapBlock = block;
+  }
+
+  private swapBlockFor(fs: CloneFs, dir: string, from: string, to: string, e: SimFsError, during: SwapBlock['during'], ids: { taskId: string | null; attemptId: string | null }): SwapBlock {
+    return {
+      detectedAt: this.now(),
+      folder: `${fs.root}/${dir}`,
+      sourceName: from,
+      destinationName: to,
+      movedBack: swapKind(e) === 'moved-back',
+      during,
+      taskId: ids.taskId,
+      attemptId: ids.attemptId,
+      error: e.message,
+    };
+  }
+
+  private noteSwap(projectId: string, b: SwapBlock): void {
+    this.note(
+      `Project ${this.project(projectId).name} is blocked: something replaced a file while the app was saving it in ${b.folder} (${b.sourceName} → ${b.destinationName}). ${
+        b.movedBack ? 'The swapped-in entry was moved back.' : 'The swapped-in entry could NOT be moved back and may still be at the record name.'
+      } Nothing was published from that write.`,
+    );
+  }
+
+  /** Ahmed's deliberate "I have checked this folder" action. Recorded, with the block it lifts. */
+  liftSwapBlock(projectId: string) {
+    const p = this.project(projectId);
+    if (!p.swapBlock) throw new UserError('This project is not blocked by a detected swap.');
+    const block = p.swapBlock;
+    this.db.transact('project-swap-block-lifted', (d) => {
+      const row = d.projects.find((x) => x.id === projectId)!;
+      row.swapBlockHistory = [...(row.swapBlockHistory ?? []), { block, liftedAt: this.now(), action: 'I have checked this folder' }];
+      row.swapBlock = null;
+    });
+    this.note(`Ahmed checked ${block.folder} ("I have checked this folder"); the block on ${p.name} was lifted. Recovery runs on the next start.`);
     this.changed();
     return this.project(projectId);
   }
@@ -536,6 +585,26 @@ export class Workspace {
       dh?.close();
       dh = null;
       if (!(e instanceof SimFsError)) throw e;
+      const swap = swapKind(e);
+      if (swap) {
+        // Plan revision 9: a swap was detected. Nothing is published from this write, whether or
+        // not the swapped-in entry was moved back, and the project is blocked (recorded in the same
+        // transaction). Nothing is quarantined now: whatever is at either name stays where it is.
+        const a = this.attempt(attemptId);
+        const block = this.swapBlockFor(fs, dir, tmpName, name, e, 'record', { taskId: a.taskId, attemptId });
+        const error = `swapped: something replaced ${dir}/${tmpName} while it was being moved to ${name}; ${
+          swap === 'moved-back' ? 'the swapped-in entry was moved back' : `the swapped-in entry could NOT be moved back and may still be at ${final}`
+        }. Nothing was published; the project is blocked.`;
+        this.db.transact(`not-published:${name}`, (d) => {
+          const r = d.recordFiles.find((x) => x.attemptId === attemptId && x.name === name)!;
+          r.state = 'not_published';
+          r.error = error;
+          r.swap = swap;
+          this.blockForSwap(d, a.projectId, block);
+        });
+        this.noteSwap(a.projectId, block);
+        return { ok: false, error };
+      }
       // Our own temporary file, if we created it, goes to quarantine (moved, never deleted).
       // A ".tmp-" name that already existed is someone else's and is left alone.
       if (created) {
@@ -943,7 +1012,7 @@ export class Workspace {
       // it is NOT settled on a partial picture: it is marked "recovery pending" (retry blocked) and
       // tried again on every start. One damaged folder never stops recovery for the others.
       for (const a of this.t.attempts) if (this.recoverAttempt(a.id)) interrupted += 1;
-      this.isolated('recovering outside reviews', () => this.recoverOutsideSaves());
+      this.recoverOutsideSaves();
     } finally {
       this.recovering = false;
     }
@@ -978,13 +1047,13 @@ export class Workspace {
     }
   }
 
-  /** Run one recovery step; a file error (an unreadable or odd entry) is noted and recovery goes on. */
+  /** Run one recovery step; a file error (an unreadable or odd entry) is noted, the step is retried on the next start, and recovery goes on. */
   private isolated(what: string, fn: () => void): void {
     try {
       fn();
     } catch (e) {
       if (!(e instanceof SimFsError)) throw e;
-      this.note(`Recovery: a file problem while ${what}: ${e.message}. Other attempts were still recovered.`);
+      this.note(`Recovery: a file problem while ${what}: ${e.message}. It is tried again on the next start; everything else was still recovered.`);
     }
   }
 
@@ -1023,10 +1092,13 @@ export class Workspace {
           d.recordFiles.find((x) => x.attemptId === a.id && x.name === row.name)!.state = 'published';
         });
       } else if (have === undefined) {
+        // Nothing readable at the name. Something that is not a regular file there (a folder, a
+        // symlink) is never counted as published; it is left in place and the inventory lists it.
+        const kind = fs.entryKind(path);
         this.db.transact(`recovery:not-published:${row.name}`, (d) => {
           const x = d.recordFiles.find((y) => y.attemptId === a.id && y.name === row.name)!;
           x.state = 'not_published';
-          x.error = 'missing after restart';
+          x.error = kind === null ? 'missing after restart' : `after restart, something that is not a regular file (${kind === 'dir' ? 'a folder' : 'another kind of entry'}) is at this name; not a valid record, left in place`;
         });
       } else if (!blocked) {
         this.quarantine(fs, dir, row.name, row.writeId);
@@ -1054,6 +1126,13 @@ export class Workspace {
       }
     }
     if (blocked) return;
+    // A write that detected a swap and could not move the swapped-in entry back: whatever is at the
+    // record name is not the app's record. A regular file there goes to quarantine; anything else is
+    // left in place and listed in the inventory. Never counted as published.
+    for (const row of this.t.recordFiles.filter((r) => r.attemptId === a.id && r.state === 'not_published' && r.swap === 'not-moved-back')) {
+      const path = `${dir}/${row.name}`;
+      if (fs.entryKind(path) === 'file' && fs.hash(path) !== row.plannedHash) this.quarantine(fs, dir, row.name, row.writeId);
+    }
     // Records already published: content that no longer matches its recorded hash is moved to
     // quarantine. The row stays "published", so the file stays required and the record state
     // shows it as quarantined (damaged). Nothing here changes an outcome.
@@ -1084,6 +1163,19 @@ export class Workspace {
         fs.quarantineMove(dir, name, qName);
       } catch (e) {
         if (e instanceof SimFsError && e.code === 'EEXIST') continue;
+        if (e instanceof SimFsError && swapKind(e)) {
+          // Plan revision 9: block and warn, as for a record write.
+          const p = this.t.projects.find((x) => this.clones.get(x.folderId) === fs);
+          if (p) {
+            const parts = dir.split('/');
+            const taskId = parts[1] ?? null;
+            const attemptId = parts[2] && parts[2] !== 'outside' ? parts[2] : null;
+            const block = this.swapBlockFor(fs, dir, name, `quarantine/${qName}`, e, 'quarantine', { taskId, attemptId });
+            this.db.transact('project-swap-block', (d) => this.blockForSwap(d, p.id, block));
+            this.noteSwap(p.id, block);
+            this.changed();
+          }
+        }
         throw e;
       }
       this.hooks.point(`quarantine:${label}:moved`);
@@ -1223,11 +1315,23 @@ export class Workspace {
           });
           throw new UserError('Could not find a free outside-review number after 100 tries. The pasted text was kept as a temporary file; it is moved to quarantine on the next start.');
         }
+        const target = `${number}-${input.source}-${date}.md`;
         try {
-          dh.publish(tmpName, `${number}-${input.source}-${date}.md`); // no-replace move
+          dh.publish(tmpName, target); // no-replace move
           this.hooks.point('outside:moved');
           break;
         } catch (e) {
+          if (e instanceof SimFsError && swapKind(e)) {
+            // Plan revision 9: nothing is saved from this write, and the project is blocked.
+            const block = this.swapBlockFor(fs, dir, tmpName, target, e, 'outside-review', { taskId: task.id, attemptId: null });
+            this.db.transact('outside:not-saved', (d) => {
+              d.outsideSaves.find((s) => s.saveId === saveId)!.state = 'not_saved';
+              this.blockForSwap(d, task.projectId, block);
+            });
+            this.noteSwap(task.projectId, block);
+            this.changed();
+            throw new UserError(`Not saved. ${swapBlockMessage(block)}`);
+          }
           if (!(e instanceof SimFsError) || e.code !== 'EEXIST') throw e;
           number += 1;
           this.db.transact('outside:renumber', (d) => {
@@ -1255,46 +1359,72 @@ export class Workspace {
     return `${taskDir(s.taskId)}/outside/${s.number}-${s.source}-${s.date}.md`;
   }
 
+  /**
+   * F4 recovery. Each save, and each task's outside/ folder, is recovered on its own: an unreadable
+   * one is noted, left as it is, and tried again on the next start; the others are still recovered
+   * and their temporary files cleaned up.
+   */
   private recoverOutsideSaves(): void {
     for (const s of this.t.outsideSaves) {
-      if (this.projectBlock(s.projectId)) continue;
-      const fs = this.cloneOf(s.projectId);
-      const path = this.outsidePath(s);
-      const have = fs.hash(path);
-      if (s.state === 'intended') {
-        const next = have === s.textHash ? 'published' : 'not_saved';
-        this.db.transact(`recovery:outside:${next}`, (d) => {
-          d.outsideSaves.find((x) => x.saveId === s.saveId)!.state = next;
-        });
-      } else if (s.state === 'published') {
-        let damaged: string | null = null;
-        if (have === undefined) damaged = 'file is missing';
-        else if (have !== s.textHash) {
-          damaged = 'content does not match; moved to quarantine';
-          this.quarantine(fs, `${taskDir(s.taskId)}/outside`, path.split('/').pop()!, s.saveId);
-        }
-        if (damaged !== s.damaged) {
-          this.db.transact('recovery:outside:damaged', (d) => {
-            d.outsideSaves.find((x) => x.saveId === s.saveId)!.damaged = damaged;
-          });
-        }
-      }
+      this.isolated(`recovering outside review ${this.outsidePath(s)}`, () => this.recoverOutsideSave(s.saveId));
     }
-    // Any .tmp- file left in outside/, whatever its save's state, goes to outside/quarantine/.
-    for (const [folderId, fs] of this.clones) {
-      void folderId;
-      for (const path of fs.list('app-records/')) {
-        const m = /^(app-records\/[^/]+\/outside)\/(\.tmp-(.+))$/.exec(path);
-        if (m) this.quarantine(fs, m[1]!, m[2]!, m[3]!);
+    // Any .tmp- file left in a task's outside/ folder, whatever its save's state, goes to
+    // outside/quarantine/. Only each task's own outside/ folder is listed.
+    for (const t of this.t.tasks) {
+      if (this.projectBlock(t.projectId)) continue;
+      const fs = this.cloneOf(t.projectId);
+      const dir = `${taskDir(t.id)}/outside`;
+      this.isolated(`cleaning temporary files in ${dir}`, () => {
+        for (const path of fs.list(`${dir}/.tmp-`)) {
+          const name = path.slice(dir.length + 1);
+          this.isolated(`cleaning ${path}`, () => void this.quarantine(fs, dir, name, name.slice('.tmp-'.length)));
+        }
+      });
+    }
+  }
+
+  private recoverOutsideSave(saveId: string): void {
+    const s = this.t.outsideSaves.find((x) => x.saveId === saveId)!;
+    if (this.projectBlock(s.projectId)) return;
+    const fs = this.cloneOf(s.projectId);
+    const path = this.outsidePath(s);
+    const have = fs.hash(path);
+    if (s.state === 'intended') {
+      const next = have === s.textHash ? 'published' : 'not_saved';
+      this.db.transact(`recovery:outside:${next}`, (d) => {
+        d.outsideSaves.find((x) => x.saveId === s.saveId)!.state = next;
+      });
+    } else if (s.state === 'published') {
+      let damaged: string | null = null;
+      if (have === undefined) damaged = 'file is missing';
+      else if (have !== s.textHash) {
+        damaged = 'content does not match; moved to quarantine';
+        this.quarantine(fs, `${taskDir(s.taskId)}/outside`, path.split('/').pop()!, s.saveId);
+      }
+      if (damaged !== s.damaged) {
+        this.db.transact('recovery:outside:damaged', (d) => {
+          d.outsideSaves.find((x) => x.saveId === s.saveId)!.damaged = damaged;
+        });
       }
     }
   }
 
   // ---------- record state ----------
 
-  recordState(attemptId: string) {
+  /**
+   * Record state of one attempt. If its files cannot be read right now (an unreadable folder, a
+   * disk error), that attempt alone shows "cannot be checked right now" with the path and error;
+   * it never stops other attempts or tasks from loading.
+   */
+  recordState(attemptId: string): RecordState {
     const a = this.attempt(attemptId);
-    return computeRecordState(a, this.cloneOf(a.projectId), this.t.recordFiles);
+    const fs = this.cloneOf(a.projectId);
+    try {
+      return computeRecordState(a, fs, this.t.recordFiles);
+    } catch (e) {
+      if (!(e instanceof SimFsError)) throw e;
+      return { kind: 'unchecked', path: `${fs.root}/${attemptDir(a.taskId, a.id)}`, error: e.message };
+    }
   }
 
   /** Simulation control: change or remove a record file behind the app's back. */
@@ -1312,6 +1442,13 @@ export class Workspace {
     this.note(`Simulation: ${file} of attempt ${a.number} was ${mode === 'delete' ? 'deleted' : 'changed'} outside the app.`);
     this.changed();
   }
+}
+
+/** The blocking reason shown everywhere for a detected swap (plan revision 9). */
+export function swapBlockMessage(b: SwapBlock): string {
+  return `Check this folder. Something replaced a file while the app was saving it: ${b.folder} (${b.sourceName} → ${b.destinationName}). ${
+    b.movedBack ? 'The entry that was swapped in was moved back to its original name.' : `The entry that was swapped in could NOT be moved back; it may still be at ${b.destinationName}.`
+  } Nothing was published from that write. No task or write runs in this project until you choose "I have checked this folder".`;
 }
 
 function removeTaskRows(d: Tables, taskIds: string[]): void {

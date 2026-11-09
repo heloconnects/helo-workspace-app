@@ -61,6 +61,17 @@ export class SimFsError extends Error {
   }
 }
 
+/** Native codes for a detected swap during a move (plan revision 9). */
+export const SWAP_MOVED_BACK = 'ESWAPPED_MOVED_BACK';
+export const SWAP_NOT_MOVED_BACK = 'ESWAPPED_NOT_MOVED_BACK';
+
+export function swapKind(e: unknown): 'moved-back' | 'not-moved-back' | null {
+  if (!(e instanceof SimFsError)) return null;
+  if (e.code === SWAP_MOVED_BACK) return 'moved-back';
+  if (e.code === SWAP_NOT_MOVED_BACK) return 'not-moved-back';
+  return null;
+}
+
 /**
  * A folder handle opened once for one publication. All operations are
  * relative to it (F3): create a new file exclusively, then move it to its
@@ -87,6 +98,8 @@ export interface CloneFs {
   read(path: string): string | undefined;
   hash(path: string): string | undefined;
   list(prefix: string): string[];
+  /** What is at a path: a regular file, a folder, something else (a symlink, a FIFO), or nothing. Never follows a symlink. */
+  entryKind(path: string): 'file' | 'dir' | 'other' | null;
   /** Open (creating missing folders) the folder at a relative path, as a handle. Refused while the project is blocked. */
   openDir(dir: string): DirHandle;
   /** No-replace move of dir/name to dir/quarantine/qName; fails with EEXIST if qName exists. Does not flush. */
@@ -130,6 +143,10 @@ export class SimFs implements CloneFs {
 
   list(prefix: string): string[] {
     return [...this.files.keys()].filter((p) => p.startsWith(prefix)).sort();
+  }
+
+  entryKind(path: string): 'file' | null {
+    return this.files.has(path) ? 'file' : null;
   }
 
   /** Throw the injected fault for this key, if one is armed. */

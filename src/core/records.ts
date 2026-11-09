@@ -13,7 +13,7 @@ import {
 } from '../shared/types.js';
 import { prettyCanonicalJson, sha256 } from './hash.js';
 import type { AttemptRow, RecordFileRow } from './schema.js';
-import type { CloneFs } from './sim-store.js';
+import { SimFsError, type CloneFs } from './sim-store.js';
 
 export const FINAL_STATUS = 'final-status.json';
 
@@ -138,6 +138,7 @@ export function computeRecordState(attempt: AttemptRow, fs: CloneFs, rows: Recor
 export function displayLine(state: AttemptState, outcome: Outcome | null, completionLabel: string | null, record: RecordState): string {
   if (!outcome) return STATE_LABEL[state];
   if (record.kind === 'damaged') return `${OUTCOME_LABEL[outcome]} — record damaged`;
+  if (record.kind === 'unchecked') return `${OUTCOME_LABEL[outcome]} — record cannot be checked right now`;
   if (outcome === 'complete' && completionLabel) return completionLabel;
   return OUTCOME_LABEL[outcome];
 }
@@ -177,8 +178,53 @@ export function classify(path: string): { kind: InventoryKind; attemptId: string
   return { kind: 'record', attemptId, holds: HOLDS[name] ?? 'Unknown file.', flag: HOLDS[name] ? null : 'Not a known record file' };
 }
 
-export function inventoryEntries(fs: CloneFs, taskId: string): InventoryEntry[] {
-  return fs.list(`${taskDir(taskId)}/`).map((path) => {
+/**
+ * F5 inventory of one task's app-records/ folder. If part of it cannot be read right now, each of
+ * the task's folders (its attempts, outside/) is listed on its own, and an unreadable one is shown
+ * as a row saying so, so the inventory is never silently partial.
+ */
+export function inventoryEntries(fs: CloneFs, taskId: string, attemptIds: string[] = []): InventoryEntry[] {
+  let paths: string[];
+  const unreadable: InventoryEntry[] = [];
+  try {
+    paths = fs.list(`${taskDir(taskId)}/`);
+  } catch (e) {
+    if (!(e instanceof SimFsError)) throw e;
+    paths = [];
+    for (const dir of [...attemptIds.map((a) => attemptDir(taskId, a)), `${taskDir(taskId)}/outside`]) {
+      try {
+        paths.push(...fs.list(`${dir}/`));
+      } catch (err) {
+        if (!(err instanceof SimFsError)) throw err;
+        const isOutside = dir.endsWith('/outside');
+        unreadable.push({
+          path: dir,
+          kind: 'unreadable',
+          attemptId: isOutside ? null : dir.split('/')[2]!,
+          holds: 'This folder cannot be read right now, so its contents are not listed.',
+          flag: `Cannot be read right now: ${err.message}. Check it before you commit.`,
+          bytes: 0,
+        });
+      }
+    }
+  }
+  return [...unreadable, ...inventoryRows(fs, paths)];
+}
+
+function inventoryRows(fs: CloneFs, paths: string[]): InventoryEntry[] {
+  return paths.map((path) => {
+    const kind = fs.entryKind(path);
+    if (kind === 'dir' || kind === 'other') {
+      const c = classify(path);
+      return {
+        path,
+        kind: 'not-a-file' as const,
+        attemptId: c.attemptId,
+        holds: kind === 'dir' ? 'A folder the app did not create.' : 'An entry that is not a regular file (for example a symlink).',
+        flag: 'Not a regular file: not a valid record. Left in place by the app; check it before you commit.',
+        bytes: 0,
+      };
+    }
     const c = classify(path);
     return { path, ...c, bytes: Buffer.byteLength(fs.read(path) ?? '', 'utf8') };
   });

@@ -64,6 +64,8 @@ export interface HeloApi {
   archiveProject(input: { projectId: string; archived: boolean }): Promise<Result<ProjectView>>;
   deleteProject(input: { projectId: string }): Promise<Result<{ removed: true }>>;
   confirmFolderIdentity(input: { projectId: string }): Promise<Result<ProjectView>>;
+  /** "I have checked this folder": lifts a block set by a detected swap (plan revision 9). Recorded. */
+  confirmFolderChecked(input: { projectId: string }): Promise<Result<ProjectView>>;
   listTasks(input: { projectId: string }): Promise<Result<TaskSummary[]>>;
   previewSharing(input: ComposeInput): Promise<Result<SharingPlanView>>;
   createTask(input: ComposeInput): Promise<Result<{ taskId: string }>>;
@@ -94,6 +96,7 @@ export const API_METHODS = [
   'archiveProject',
   'deleteProject',
   'confirmFolderIdentity',
+  'confirmFolderChecked',
   'listTasks',
   'previewSharing',
   'createTask',

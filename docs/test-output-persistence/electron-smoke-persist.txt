@@ -1,9 +1,8 @@
-[8336:1107/022805.365251:ERROR:base/process/process_mac.cc:98] task_policy_set TASK_SUPPRESSION_POLICY: (os/kern) invalid argument (4)
-SMOKE-PERSIST {"phase":"run","electron":"44.9.3","attemptA":"a-e385f02db9144437","stateA":"complete","attemptB":"a-1952355c2b9411be","stateB":"reviewing","filesA":["1-draft-sent.json","1-draft.md","2-review-sent.json","2-review.md","3-synthesis-sent.json","3-synthesis.md","final-status.json","packet.md","sharing-plan.json"]}
+SMOKE-PERSIST {"phase":"run","electron":"44.9.3","attemptA":"a-105dfe8c72310472","stateA":"complete","attemptB":"a-a3bef3fafd2877ef","stateB":"reviewing","filesA":["1-draft-sent.json","1-draft.md","2-review-sent.json","2-review.md","3-synthesis-sent.json","3-synthesis.md","final-status.json","packet.md","sharing-plan.json"]}
   ok: launch 1: attempt A completed
   ok: launch 1: attempt A has nine record files
   ok: launch 1: quit while attempt B was reviewing
-SMOKE-PERSIST {"phase":"verify","electron":"44.9.3","page":{"banner":true,"persistentNote":true,"projectRows":1},"projects":1,"tasks":2,"attempts":[{"id":"a-e385f02db9144437","state":"complete","final":true,"record":"intact","unresolved":[]},{"id":"a-1952355c2b9411be","state":"interrupted","final":true,"record":"intact","unresolved":["review"]}]}
+SMOKE-PERSIST {"phase":"verify","electron":"44.9.3","page":{"banner":true,"persistentNote":true,"projectRows":1},"projects":1,"tasks":2,"attempts":[{"id":"a-105dfe8c72310472","state":"complete","final":true,"record":"intact","unresolved":[]},{"id":"a-a3bef3fafd2877ef","state":"interrupted","final":true,"record":"intact","unresolved":["review"]}]}
   ok: launch 2: project and both tasks survived the relaunch
   ok: launch 2: attempt A still complete, record intact
   ok: launch 2: attempt B interrupted by start-up recovery, record intact
@@ -13,4 +12,4 @@ SMOKE-PERSIST {"phase":"verify","electron":"44.9.3","page":{"banner":true,"persi
   ok: test folder holds only RULES.md and app-records/
   ok: RULES.md unchanged
 SMOKE-PERSIST PASSED
-exit: 0
+exit 0

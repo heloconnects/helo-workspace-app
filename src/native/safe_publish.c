@@ -1,6 +1,6 @@
 // safe_publish: the only code in the app that writes into a project folder.
 //
-// It implements the F3 publication rules of the plan (revision 7), with one
+// It implements the F3 publication rules of the plan (revision 9), with one
 // approved change (Ahmed, 2026-11-07, after the Codex review of persistence v1):
 // publication and quarantine use macOS's no-replace move, renameatx_np with
 // RENAME_EXCL, instead of a hard link followed by removing the old name. The
@@ -14,8 +14,11 @@
 //     O_NOFOLLOW), so the folder that was checked is the folder written to.
 //   - A record is written to a new temporary file (O_CREAT | O_EXCL |
 //     O_NOFOLLOW), flushed, then moved to its final name with RENAME_EXCL.
-//     Only a regular file is ever moved, and the moved entry is verified to be
-//     the very file that was checked; anything swapped in is moved back.
+//     The source must be a regular file, and the moved entry is verified to be
+//     the very file that was checked. macOS moves whatever holds the source
+//     name, so a swap at that instant is detected, not prevented: the app
+//     tries once to move the swapped-in entry back and reports whether it
+//     could (see moveNoReplace; plan revision 9).
 //   - Newly created folders, and folders whose entries change, are flushed.
 //   - Files are read only after checking they are regular files, opened with
 //     O_NONBLOCK so a FIFO or device put in place of a record cannot hang.
@@ -294,25 +297,51 @@ static napi_value CreateExclusive(napi_env env, napi_callback_info info) {
   return make_undefined(env);
 }
 
-// moveNoReplace(srcFd, name, destFd, destName): atomic move that fails with EEXIST if destName
-// exists (renameatx_np RENAME_EXCL). Nothing is replaced and nothing is deleted.
+// Test-only hook: when moveNoReplace is given a fifth argument (a function), it is called with
+// "before-move" (after the source was opened and checked, just before the move) and, if a swap was
+// detected, with "before-move-back". Tests use it to stage the swap race with ordinary file
+// operations of their own. The app itself never passes it. Returns 0, or -1 if the hook threw.
+static int call_hook(napi_env env, napi_value hook, const char *stage) {
+  if (hook == NULL) return 0;
+  napi_value global, arg, ignored;
+  napi_get_global(env, &global);
+  napi_create_string_utf8(env, stage, NAPI_AUTO_LENGTH, &arg);
+  if (napi_call_function(env, global, hook, 1, &arg, &ignored) != napi_ok) return -1;
+  return 0;
+}
+
+// moveNoReplace(srcFd, name, destFd, destName[, testHook]): atomic move that fails with EEXIST if
+// destName exists (renameatx_np RENAME_EXCL). Nothing is replaced and nothing is deleted.
 //
-// Only a regular file is moved. The source is opened first (O_NOFOLLOW | O_NONBLOCK) and must be
-// a regular file; that handle is held across the move. After the move, the entry now at destName
-// must be that very file (same device and inode). If something else was swapped in at the source
-// name in between (a folder, another file), it is moved back to where it was and "ESWAPPED" is
-// reported, so nothing but the checked regular file is ever relocated.
+// Only a regular file is meant to be moved. The source is opened first (O_NOFOLLOW | O_NONBLOCK)
+// and must be a regular file; that handle is held across the move, and after the move the entry
+// now at destName must be that very file (same device and inode).
+//
+// The limit (plan revision 9, "Threat model and the move limit"): macOS moves whatever entry holds
+// the source NAME at the moment of the move; it cannot move "only this exact file". If another
+// entry (a folder, another file) is swapped in at the source name in between, it is moved. This is
+// DETECTED afterwards, not prevented. The app then tries once to move that entry back, and reports
+// one of two codes; in both cases nothing is published from this write:
+//   ESWAPPED_MOVED_BACK      the swapped-in entry was moved back to the source name;
+//   ESWAPPED_NOT_MOVED_BACK  moving it back failed; it may still be at the destination name.
+// If the process is killed between the two moves, the swapped-in entry stays at the destination
+// name. Nothing is deleted in any case.
 //
 // The move does not flush. The caller flushes both folders afterwards (fsyncDir), so a crash or a
 // failed flush after a successful move can be told apart from a failed move.
 static napi_value MoveNoReplace(napi_env env, napi_callback_info info) {
-  size_t argc = 4;
-  napi_value argv[4];
+  size_t argc = 5;
+  napi_value argv[5];
   int sfd, dfd;
   char name[MAX_NAME + 2], dest[MAX_NAME + 2];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
   if (argc < 4 || !get_fd(env, argv[0], &sfd) || !get_name(env, argv[1], name) || !get_fd(env, argv[2], &dfd) || !get_name(env, argv[3], dest))
     return throw_code(env, "EINVAL", "EINVAL: moveNoReplace(srcFd, name, destFd, destName)");
+  napi_value hook = NULL;
+  if (argc >= 5) {
+    napi_valuetype t;
+    if (napi_typeof(env, argv[4], &t) == napi_ok && t == napi_function) hook = argv[4];
+  }
   int fd = openat(sfd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   if (fd < 0) return throw_errno(env, "open file to move", name, errno);
   struct stat before;
@@ -325,6 +354,10 @@ static napi_value MoveNoReplace(napi_env env, napi_callback_info info) {
     close(fd);
     return throw_code(env, "EINVAL", "EINVAL: only regular files are moved");
   }
+  if (call_hook(env, hook, "before-move") != 0) {
+    close(fd);
+    return NULL; // the hook's exception is pending
+  }
   if (renameatx_np(sfd, name, dfd, dest, MOVE_FLAGS) != 0) {
     int err = errno;
     close(fd);
@@ -334,11 +367,13 @@ static napi_value MoveNoReplace(napi_env env, napi_callback_info info) {
   int same = fstatat(dfd, dest, &after, AT_SYMLINK_NOFOLLOW) == 0 && after.st_dev == before.st_dev && after.st_ino == before.st_ino;
   close(fd);
   if (!same) {
-    // Something else was swapped in at the source name: put it back, never keep it.
+    // Something else was swapped in at the source name and has been moved. Try once to move it
+    // back. This is another move by name, so it can fail; nothing is ever deleted.
+    if (call_hook(env, hook, "before-move-back") != 0) return NULL;
     if (renameatx_np(dfd, dest, sfd, name, MOVE_FLAGS) == 0) {
-      return throw_code(env, "ESWAPPED", "ESWAPPED: the file changed during the move; the entry that was swapped in was moved back, nothing was published");
+      return throw_code(env, "ESWAPPED_MOVED_BACK", "ESWAPPED_MOVED_BACK: something replaced the file while it was being saved; the entry that was swapped in was moved back to its original name; nothing was published");
     }
-    return throw_code(env, "ESWAPPED", "ESWAPPED: the file changed during the move and the swapped-in entry could not be moved back; it was left at the destination name (nothing deleted)");
+    return throw_code(env, "ESWAPPED_NOT_MOVED_BACK", "ESWAPPED_NOT_MOVED_BACK: something replaced the file while it was being saved; the entry that was swapped in could NOT be moved back and may still be at the record name; nothing was published, nothing was deleted");
   }
   return make_undefined(env);
 }

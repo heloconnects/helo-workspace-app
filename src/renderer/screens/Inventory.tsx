@@ -6,6 +6,8 @@ const KIND_LABEL = {
   'outside-review': 'Outside review',
   'temporary-leftover': 'Temporary leftover',
   quarantine: 'Quarantine',
+  'not-a-file': 'Not a regular file',
+  unreadable: 'Folder that cannot be read',
 } as const;
 
 /** F5: everything in this task's app-records/ folder, before you commit. */

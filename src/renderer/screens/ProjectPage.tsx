@@ -2,10 +2,12 @@ import { useEffect, useState } from 'react';
 import type { ComposeInput } from '../../shared/api.js';
 import { BUSINESS_LABEL, DEFAULT_DRAFTER, PROVIDER_LABEL, otherProvider, type Provider, type SharingPlanView } from '../../shared/types.js';
 import { useApi, useLoad } from '../api-context.js';
-import { ErrorNote, Inert, Section, StatusBadge } from '../components.js';
+import { ErrorNote, Inert, Section, StatusBadge, SwapBlockNotice } from '../components.js';
 import type { Go } from '../App.js';
 
 export function ProjectPage({ id, go }: { id: string; go: Go }) {
+  const api = useApi();
+  const [checkError, setCheckError] = useState<string | null>(null);
   const projects = useLoad((a) => a.listProjects(), []);
   const tasks = useLoad((a) => a.listTasks({ projectId: id }), [id]);
   const p = projects.data?.find((x) => x.id === id);
@@ -23,7 +25,18 @@ export function ProjectPage({ id, go }: { id: string; go: Go }) {
       <p className="lede">
         {BUSINESS_LABEL[p.business]} · <code>{p.folder}</code> {p.archived && <strong>· Archived: cannot start tasks</strong>}
       </p>
-      <ErrorNote error={p.blocked} />
+      {p.swapBlock ? (
+        <SwapBlockNotice
+          block={p.swapBlock}
+          onChecked={async () => {
+            const r = await api.confirmFolderChecked({ projectId: p.id });
+            setCheckError(r.ok ? null : r.error);
+          }}
+        />
+      ) : (
+        <ErrorNote error={p.blocked} />
+      )}
+      <ErrorNote error={checkError} />
 
       <Section title="Tasks" id="tasks">
         <ErrorNote error={tasks.error} />
@@ -47,7 +60,7 @@ export function ProjectPage({ id, go }: { id: string; go: Go }) {
                   <td>{PROVIDER_LABEL[t.drafter]}</td>
                   <td>
                     {t.latest ? (
-                      <StatusBadge state={t.latest.state} display={t.latest.display} damaged={t.latest.recordState.kind === 'damaged'} />
+                      <StatusBadge state={t.latest.state} display={t.latest.display} damaged={t.latest.recordState.kind === 'damaged' || t.latest.recordState.kind === 'unchecked'} />
                     ) : (
                       <span className="muted">Not started: review sharing first</span>
                     )}

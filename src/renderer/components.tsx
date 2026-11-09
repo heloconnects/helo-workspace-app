@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { SIMULATION_BANNER, type AttemptState, type RecordState } from '../shared/types.js';
+import { SIMULATION_BANNER, type AttemptState, type RecordState, type SwapBlockView } from '../shared/types.js';
 
 export function Banner() {
   return (
@@ -31,6 +31,15 @@ export function StatusBadge({ state, display, damaged }: { state: AttemptState; 
 export function RecordStateView({ record }: { record: RecordState }) {
   if (record.kind === 'running') return <span className="record record-running">Record state: attempt still running</span>;
   if (record.kind === 'intact') return <span className="record record-intact">Record state: intact</span>;
+  if (record.kind === 'unchecked')
+    return (
+      <div className="record record-damaged" data-testid="record-unchecked">
+        <strong>Record state: cannot be checked right now</strong>
+        <div>
+          <code>{record.path}</code> — {record.error}
+        </div>
+      </div>
+    );
   return (
     <div className="record record-damaged" data-testid="record-damaged">
       <strong>Record state: damaged</strong>
@@ -85,5 +94,33 @@ export function List({ items, empty = 'None' }: { items: string[]; empty?: strin
         <li key={n}>{i}</li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * Plan revision 9, "block and warn": what was detected, where, whether the entry was moved back,
+ * and the one action that lifts the block.
+ */
+export function SwapBlockNotice({ block, onChecked }: { block: SwapBlockView; onChecked: () => void }) {
+  return (
+    <div className="warn-box" role="alert" data-testid="swap-block">
+      <strong>{block.advice}</strong>
+      <p>
+        Folder: <code>{block.folder}</code>
+        <br />
+        Moved from <code>{block.sourceName}</code> to <code>{block.destinationName}</code>, detected {block.detectedAt}
+        {block.during === 'quarantine' ? ' (while moving a file to quarantine)' : block.during === 'outside-review' ? ' (while saving an outside review)' : ' (while saving a task record)'}.
+      </p>
+      <p>
+        {block.movedBack
+          ? 'The entry that was swapped in was moved back to its original name.'
+          : `The entry that was swapped in could NOT be moved back. It may still be at ${block.destinationName}.`}{' '}
+        Nothing was published from that write. No task or write runs in this project until you have checked the folder.
+      </p>
+      <p className="muted">{block.error}</p>
+      <button type="button" onClick={onChecked}>
+        I have checked this folder
+      </button>
+    </div>
   );
 }

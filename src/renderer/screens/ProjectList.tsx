@@ -63,6 +63,11 @@ export function ProjectList({ go }: { go: Go }) {
               <td>{p.archived ? 'Archived' : p.blocked ? `Blocked: ${p.blocked}` : 'Active'}</td>
               <td>{p.taskCount}</td>
               <td className="actions">
+                {p.swapBlock && (
+                  <button type="button" onClick={() => act(api.confirmFolderChecked({ projectId: p.id }))}>
+                    I have checked this folder
+                  </button>
+                )}
                 {p.identityUnconfirmed && (
                   <button type="button" onClick={() => act(api.confirmFolderIdentity({ projectId: p.id }))}>
                     Confirm folder

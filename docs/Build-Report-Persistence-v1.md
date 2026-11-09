@@ -1,12 +1,13 @@
 # Build report: Helo Workspace app, persistence v1
 
-Claude Code session, 2026-11-06 to 2026-11-07, in `~/Desktop/Helo-Shared/helo-workspace-app/`, on branch `build/persistence-v1` (started from `build/simulated-v1` at `4c13917`). Written for the brief `docs/Build-Brief-Persistence-v1.md`, which Ahmed approved in chat on 2026-11-06 ("Approved, start") after choosing option A. That brief builds on the plan `docs/Implementation-Plan-DRAFT.md`, revision 7.
+Claude Code session, 2026-11-06 to 2026-11-09, in `~/Desktop/Helo-Shared/helo-workspace-app/`, on branch `build/persistence-v1` (started from `build/simulated-v1` at `4c13917`). Written for the brief `docs/Build-Brief-Persistence-v1.md`, which Ahmed approved in chat on 2026-11-06 ("Approved, start") after choosing option A. That brief builds on the plan `docs/Implementation-Plan-DRAFT.md`, revision 7.
 
 **The app still makes no real AI calls.** The adapters are still the fake ones from simulated v1. Nothing starts a provider program, opens a network connection or runs git. The banner on every screen still says "SIMULATION: no real AI calls".
 
-**Revised after two rounds of independent Codex review** (run by Ahmed, 2026-11-07).
+**Revised after three rounds of independent Codex review** (run by Ahmed, 2026-11-07 and 2026-11-08).
 - The first round, of `dbb2fa4`, found three High and three Medium findings.
 - The second round, of `994b0f6`, confirmed three of those resolved, marked two partly resolved, and found one new High and four new Medium problems.
+- The third round, of `3a5f7ba`, left one High and two Medium issues. They are fixed under the round 3 brief (`docs/Build-Brief-Persistence-v1-Round3-Fixes.md`) and plan revision 9; see "Round 3" in section 6.
 
 Everything raised in both rounds is fixed in code, with regression tests, except C1's plan wording, which waits for Omar; see section 6. Two fixes needed Ahmed's decision, and he approved both in chat:
 - F3 publication now uses a no-replace move instead of a hard link plus removal, so the app never deletes anything;
@@ -32,7 +33,7 @@ This is about 450 lines of C written against Node-API. It is the only code in th
 | `identity(fd)` | Returns the open folder's device and inode. The app records this at registration and checks it before every write. |
 | `openSub(rootFd, segments, create)` | Opens a folder relative to the root handle, one component at a time, without following symlinks (`O_DIRECTORY \| O_NOFOLLOW`). Missing folders are created only when asked, and each new entry is flushed in its parent. |
 | `createExclusive(fd, name, data, fullSync)` | Creates a new file relative to the handle (`O_CREAT \| O_EXCL \| O_NOFOLLOW`), writes it and flushes it (`F_FULLFSYNC` on macOS). If writing fails, the file is left in place, never deleted; it is moved to quarantine. |
-| `moveNoReplace(srcFd, name, destFd, destName)` | **The only way anything moves:** an atomic `renameatx_np` with `RENAME_EXCL`, which fails with EEXIST if the destination exists. It moves **only a regular file**: the source is opened and checked first, and that handle is held across the move. Afterwards the moved entry must be that very file (same device and inode). If something else was swapped in at the last moment, it is moved straight back and "ESWAPPED" is reported. It doesn't flush; the app flushes both folders as a separate step, so "moved but not flushed" can be told apart from "not moved". It is used to publish records and to move files into quarantine. |
+| `moveNoReplace(srcFd, name, destFd, destName)` | **The only way anything moves:** an atomic `renameatx_np` with `RENAME_EXCL`, which fails with EEXIST if the destination exists. It moves **only a regular file**: the source is opened and checked first, and that handle is held across the move. Afterwards the moved entry must be that very file (same device and inode). **Limit (plan revision 9):** macOS moves whatever holds the source name at that instant, so a swap at that moment is **detected, not prevented**. The helper then tries once to move the swapped-in entry back and reports either `ESWAPPED_MOVED_BACK` or `ESWAPPED_NOT_MOVED_BACK`; in the second case, or if the app is killed between the two moves, the swapped-in entry may stay at the record name. Either way nothing is published from that write and the app blocks the project (see "Round 3" in section 6). It doesn't flush; the app flushes both folders as a separate step, so "moved but not flushed" can be told apart from "not moved". It is used to publish records and to move files into quarantine. |
 | `readFile(fd, name, max)` | Reads a regular file only, checking the type before opening. It opens with `O_NONBLOCK`, so a FIFO or device put in place of a record can't hang it. It never reads through a symlink and has a size limit. |
 | `fsyncDir`, `listDir`, `closeDir` | Flush a folder; list it without following links; close a handle. |
 
@@ -135,13 +136,13 @@ npm run smoke:persist
 
 ## 3. Tests that ran, with their real output
 
-All five checks were run at the end of the session. The full raw output is in `docs/test-output-persistence/`.
+All five checks were run again on 2026-11-09, after the round 3 fixes. The full raw output is in `docs/test-output-persistence/`.
 
 | Check | Command | Result |
 |---|---|---|
 | Type check | `npm run typecheck` | exit 0 (`typecheck.txt`) |
 | Build (native helper, main, interface) | `npm run build` | exit 0; no download in the native build (`build.txt`) |
-| Unit, real-disk, process-kill and interface tests | `npx vitest run --reporter=verbose` | **17 files, 208 tests, all passed**, exit 0 (`vitest.txt`) |
+| Unit, real-disk, process-kill and interface tests | `npx vitest run --reporter=verbose` | **18 files, 220 tests, all passed**, exit 0 (`vitest.txt`; run 2026-11-09 after the round 3 fixes) |
 | Electron smoke test, showcase | `electron . --smoke-test` | `SMOKE PASSED`, exit 0 (`electron-smoke-showcase.txt`) |
 | Electron smoke test, persistent (two launches) | `node scripts/smoke-persist.mjs` | `SMOKE-PERSIST PASSED`, exit 0 (`electron-smoke-persist.txt`) |
 
@@ -217,91 +218,18 @@ All five checks were run at the end of the session. The full raw output is in `d
 ### Test output (verbatim, `npx vitest run --reporter=verbose`)
 
 ```
+
  RUN  v5.0.5 /Users/ahmedelhelaly/Desktop/Helo-Shared/helo-workspace-app
 
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > completes three stages, each produced by the right provider, with unresolved issues kept 152ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > reports "no issues reported" when the review has no findings 39ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > gives needs attention for an unmet acceptance criterion, with all nine record files 17ms
- ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (claude drafting) > cancellation unconfirmed with a confirmed dispatch → restart → interrupted still requires acknowledgement before a retry 266ms
- ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (claude drafting) > a crash after the dispatch was confirmed but before any result also requires acknowledgement 60ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when draft is fail, and never forwards rejected output 8ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when review is fail, and never forwards rejected output 24ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when synthesis is fail, and never forwards rejected output 36ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when draft is refuse, and never forwards rejected output 6ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when review is refuse, and never forwards rejected output 11ms
- ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (claude drafting) > does not ask when every dispatched stage ended (result, confirmed stop, or explicit resolution) 54ms
- ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (codex drafting) > cancellation unconfirmed with a confirmed dispatch → restart → interrupted still requires acknowledgement before a retry 46ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when synthesis is malformed, and never forwards rejected output 20ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when draft is empty, and never forwards rejected output 10ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when review is duplicate-final, and never forwards rejected output 21ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when review is missing-final, and never forwards rejected output 28ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when draft is wrong-hash, and never forwards rejected output 9ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when review is tool-event, and never forwards rejected output 36ms
- ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (codex drafting) > a crash after the dispatch was confirmed but before any result also requires acknowledgement 74ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when draft is truncated, and never forwards rejected output 10ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when synthesis is wrong-provenance, and never forwards rejected output 16ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > rejects a synthesis that omits a review finding 21ms
- ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (codex drafting) > does not ask when every dispatched stage ended (result, confirmed stop, or explicit resolution) 153ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > sends exactly the R4 payloads, and each -sent.json hash matches the bytes actually sent 107ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > does not dispatch a stage whose -sent.json cannot be published 25ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails with "collision" and replaces nothing when a record name already exists 9ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > shows disk-full and permission failures with the path 10ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > keeps the outcome when final-status.json cannot be written, and republishes it on restart 27ms
- ✓ tests/core/review-findings.test.ts > finding 2 (Medium): recovery reconciles records already marked published > quarantines a corrupted published record of a finished attempt; the outcome is unchanged and the record shows quarantined 37ms
- ✓ tests/core/review-findings.test.ts > finding 2 (Medium): recovery reconciles records already marked published > republishes a missing final-status.json of an already-final attempt with the same bytes and outcome 17ms
- ✓ tests/core/review-findings.test.ts > finding 2 (Medium): recovery reconciles records already marked published > a changed final-status.json of a final attempt is quarantined and replaced with the recorded bytes 15ms
- ✓ tests/core/review-findings.test.ts > finding 2 (Medium): recovery reconciles records already marked published > a published record corrupted while the attempt was running is quarantined and stays required (damaged, not intact) 8ms
- ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > refuses "complete" with matching IDs when the published files cannot support it 3ms
- ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines JSON null and settles interrupted without throwing 13ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > ignores a duplicate submission (same idempotency key) 17ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > refuses a start whose approval does not match the frozen packet 2ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > cancels during the review: the owned process confirms exit and the outcome is cancelled 16ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > turns a stage timeout into failed through cancellation semantics 64ms
- ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines a list and settles interrupted without throwing 15ms
- ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines a null file entry and settles interrupted without throwing 15ms
- ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines a file entry without a hash and settles interrupted without throwing 17ms
- ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines files not a list and settles interrupted without throwing 282ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > shows cancellation unconfirmed when the process ignores cancellation, blocks retry, quarantines the late result, and resolves explicitly 178ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > a late result after a confirmed cancel cannot change the terminal state 64ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > a new attempt re-runs all three stages from the frozen packet and keeps the earlier attempt 36ms
- ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines not JSON and settles interrupted without throwing 12ms
- ✓ tests/core/review-findings.test.ts > finding 4 (Medium): project identity is rechecked before every write > a RULES.md business change during a run blocks every later write; the attempt still gets exactly one outcome 35ms
- ✓ tests/core/review-findings.test.ts > finding 4 (Medium): project identity is rechecked before every write > a folder path change also blocks writes 2ms
- ✓ tests/core/review-findings.test.ts > re-review regression (Medium): a blocked project is still reconciled before its outcome is settled > a record published just before the crash stays required when recovery runs while blocked (claude drafting) 7ms
- ✓ tests/core/review-findings.test.ts > re-review regression (Medium): a blocked project is still reconciled before its outcome is settled > a record published just before the crash stays required when recovery runs while blocked (codex drafting) 7ms
- ✓ tests/core/review-findings.test.ts > re-review regression (Medium): a blocked project is still reconciled before its outcome is settled > a mismatched intended record is never counted as published while blocked, and is quarantined after the unblock 12ms
- ✓ tests/core/review-findings.test.ts > re-review regression (Medium): a blocked project is still reconciled before its outcome is settled > an unadoptable final-status.json left while blocked is quarantined after the unblock, and the recorded bytes are published 16ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > completes three stages, each produced by the right provider, with unresolved issues kept 27ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > reports "no issues reported" when the review has no findings 21ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > gives needs attention for an unmet acceptance criterion, with all nine record files 111ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when draft is fail, and never forwards rejected output 6ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when review is fail, and never forwards rejected output 11ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when synthesis is fail, and never forwards rejected output 18ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when draft is refuse, and never forwards rejected output 8ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when review is refuse, and never forwards rejected output 16ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when synthesis is malformed, and never forwards rejected output 33ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when draft is empty, and never forwards rejected output 12ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when review is duplicate-final, and never forwards rejected output 8ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when review is missing-final, and never forwards rejected output 33ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when draft is wrong-hash, and never forwards rejected output 6ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when review is tool-event, and never forwards rejected output 122ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when draft is truncated, and never forwards rejected output 12ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when synthesis is wrong-provenance, and never forwards rejected output 18ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > rejects a synthesis that omits a review finding 17ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > sends exactly the R4 payloads, and each -sent.json hash matches the bytes actually sent 13ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > does not dispatch a stage whose -sent.json cannot be published 7ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails with "collision" and replaces nothing when a record name already exists 7ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > shows disk-full and permission failures with the path 5ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > keeps the outcome when final-status.json cannot be written, and republishes it on restart 15ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > ignores a duplicate submission (same idempotency key) 13ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > refuses a start whose approval does not match the frozen packet 1ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > cancels during the review: the owned process confirms exit and the outcome is cancelled 8ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > turns a stage timeout into failed through cancellation semantics 141ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > shows cancellation unconfirmed when the process ignores cancellation, blocks retry, quarantines the late result, and resolves explicitly 34ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > a late result after a confirmed cancel cannot change the terminal state 31ms
- ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > a new attempt re-runs all three stages from the frozen packet and keeps the earlier attempt 22ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > success > gives exactly one outcome at every crash point, never changes a decided outcome, and never re-runs a stage 3183ms
- ✓ tests/persist/restart.test.ts > on real disk (claude drafting) > completes, writes all nine records, touches nothing outside app-records/, and survives a relaunch 3261ms
+ ✓ tests/persist/sqlite.test.ts > SQLite store > creates the schema with a migration record and survives reopening 33ms
+ ✓ tests/persist/sqlite.test.ts > SQLite store > a transaction that throws changes nothing, in memory or on disk 129ms
+ ✓ tests/persist/sqlite.test.ts > SQLite store > a crash before the transaction leaves none of it; a crash after leaves all of it 18ms
+ ✓ tests/persist/sqlite.test.ts > SQLite store > a crash after some rows were already changed inside the SQL transaction rolls all of it back 20ms
+ ✓ tests/persist/sqlite.test.ts > SQLite store > writes only changed rows, keeps order, and deletes removed rows 19ms
+ ✓ tests/persist/sqlite.test.ts > SQLite store > refuses a store written by a newer schema 18ms
+ ✓ tests/persist/round3.test.ts > Fix 1, native: a swap at the source name is detected and reported in two distinct ways > "swapped, moved back": a folder swapped in is moved back to its original name; nothing is at the record name 149ms
+ ✓ tests/persist/round3.test.ts > Fix 1, native: a swap at the source name is detected and reported in two distinct ways > "swapped, NOT moved back": when the original name is taken again, the swapped-in folder stays at the record name 125ms
+ ✓ tests/persist/round3.test.ts > Fix 1, native: a swap at the source name is detected and reported in two distinct ways > without a swap the hook changes nothing: the checked file is published 121ms
 stdout | tests/persist/smoke.test.ts > runs a task with real files and SQLite, and survives a reopen
 [
   '1-draft-sent.json',
@@ -315,8 +243,137 @@ stdout | tests/persist/smoke.test.ts > runs a task with real files and SQLite, a
   'sharing-plan.json'
 ]
 
- ✓ tests/persist/smoke.test.ts > runs a task with real files and SQLite, and survives a reopen 695ms
- ✓ tests/persist/restart.test.ts > on real disk (claude drafting) > quitting while a stage runs: after the relaunch the attempt is interrupted, and a retry needs acknowledgement 213ms
+ ✓ tests/persist/smoke.test.ts > runs a task with real files and SQLite, and survives a reopen 891ms
+ ✓ tests/persist/restart.test.ts > on real disk (claude drafting) > completes, writes all nine records, touches nothing outside app-records/, and survives a relaunch 2028ms
+ ✓ tests/persist/round3.test.ts > Fix 1, engine: block and warn on a detected swap > "moved back": nothing is published, the attempt fails by the F3 rules, and the project is blocked with the folder and names 231ms
+ ✓ tests/persist/round3.test.ts > Fix 1, engine: block and warn on a detected swap > the block survives a relaunch, refuses every task and write while it lasts, and only "I have checked this folder" lifts it, which is recorded 228ms
+ ✓ tests/persist/restart.test.ts > on real disk (claude drafting) > quitting while a stage runs: after the relaunch the attempt is interrupted, and a retry needs acknowledgement 276ms
+ ✓ tests/persist/round3.test.ts > Fix 1, engine: block and warn on a detected swap > "NOT moved back", a folder: it is never counted as published, stays in place after the unblock and is listed in the inventory 295ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > success > gives exactly one outcome at every crash point, never changes a decided outcome, and never re-runs a stage 2793ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > offers no way to delete anything 6ms
+ ✓ tests/persist/restart.test.ts > on real disk (codex drafting) > completes, writes all nine records, touches nothing outside app-records/, and survives a relaunch 415ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > creates folders, writes a temporary file exclusively and publishes it with a no-replace move 200ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > never replaces an existing file: exclusive create and the publishing move both fail with EEXIST, and the temporary file is kept 46ms
+ ✓ tests/persist/round3.test.ts > Fix 1, engine: block and warn on a detected swap > "NOT moved back", a regular file: recovery moves it to quarantine after the unblock, never counting it as published 444ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > a destination created by another process after the temporary file was made is never replaced 55ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > refuses a symlink at the root, anywhere in the root path, at any folder level, and as a file 68ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > the root folder swapped after it was opened and checked cannot redirect the write (F2 check tied to the write handle) 38ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > a folder below the root swapped after it was opened cannot redirect the write either 66ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > moves only a regular file: a folder, a symlink or a FIFO at the source name is refused and left where it is 127ms
+ ✓ tests/persist/round3.test.ts > Fix 1, engine: block and warn on a detected swap > a swap during an outside-review save: nothing is saved and the project is blocked 138ms
+ ✓ tests/persist/restart.test.ts > on real disk (codex drafting) > quitting while a stage runs: after the relaunch the attempt is interrupted, and a retry needs acknowledgement 328ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > moves into quarantine across two folder handles without replacing anything 115ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > rejects names that are not a single plain component 3ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > reads regular files only: a FIFO is refused at once without hanging, and size is limited 55ms
+ ✓ tests/persist/native.test.ts > safe_publish native helper > reports a permission error with its code and the name 5ms
+ ✓ tests/persist/round3.test.ts > Fix 1, engine: block and warn on a detected swap > recovery treats a folder found at a record name (the app killed between the two moves) as not published, and lists it 434ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > review fails > gives exactly one outcome at every crash point, never changes a decided outcome, and never re-runs a stage 1404ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > shows dispatch as uncertain when the app stopped after dispatch started but before it was confirmed (C3) 36ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > survives repeated crashes during recovery itself 316ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > a crash after final-status.json says complete but before the database records it keeps "complete" 73ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > shows "prepared; not dispatched" when the app stopped after -sent.json but before dispatch started (C3) 17ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when review is fail, and never forwards rejected output 10ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when synthesis is wrong-provenance, and never forwards rejected output 11ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > turns a stage timeout into failed through cancellation semantics 45ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when draft is wrong-hash, and never forwards rejected output 4ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > turns a stage timeout into failed through cancellation semantics 43ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > completes three stages, each produced by the right provider, with unresolved issues kept 51ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when synthesis is fail, and never forwards rejected output 11ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > rejects a synthesis that omits a review finding 13ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > shows cancellation unconfirmed when the process ignores cancellation, blocks retry, quarantines the late result, and resolves explicitly 33ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > completes three stages, each produced by the right provider, with unresolved issues kept 11ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when review is tool-event, and never forwards rejected output 8ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > shows cancellation unconfirmed when the process ignores cancellation, blocks retry, quarantines the late result, and resolves explicitly 33ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > reports "no issues reported" when the review has no findings 25ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when draft is refuse, and never forwards rejected output 6ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > sends exactly the R4 payloads, and each -sent.json hash matches the bytes actually sent 11ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > a late result after a confirmed cancel cannot change the terminal state 29ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > reports "no issues reported" when the review has no findings 10ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when draft is truncated, and never forwards rejected output 4ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > a late result after a confirmed cancel cannot change the terminal state 31ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > gives needs attention for an unmet acceptance criterion, with all nine record files 15ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when review is refuse, and never forwards rejected output 10ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > does not dispatch a stage whose -sent.json cannot be published 9ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > a new attempt re-runs all three stages from the frozen packet and keeps the earlier attempt 19ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > gives needs attention for an unmet acceptance criterion, with all nine record files 12ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when synthesis is wrong-provenance, and never forwards rejected output 9ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when draft is fail, and never forwards rejected output 7ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when synthesis is malformed, and never forwards rejected output 21ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails with "collision" and replaces nothing when a record name already exists 5ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when draft is fail, and never forwards rejected output 4ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > rejects a synthesis that omits a review finding 13ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when draft is empty, and never forwards rejected output 6ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > shows disk-full and permission failures with the path 5ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when review is fail, and never forwards rejected output 8ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > sends exactly the R4 payloads, and each -sent.json hash matches the bytes actually sent 12ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when review is duplicate-final, and never forwards rejected output 10ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > keeps the outcome when final-status.json cannot be written, and republishes it on restart 14ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when synthesis is fail, and never forwards rejected output 11ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > does not dispatch a stage whose -sent.json cannot be published 4ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when review is missing-final, and never forwards rejected output 7ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > ignores a duplicate submission (same idempotency key) 20ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when draft is refuse, and never forwards rejected output 6ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails with "collision" and replaces nothing when a record name already exists 5ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when draft is wrong-hash, and never forwards rejected output 4ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > refuses a start whose approval does not match the frozen packet 2ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when review is refuse, and never forwards rejected output 8ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > shows disk-full and permission failures with the path 5ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when review is tool-event, and never forwards rejected output 9ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > cancels during the review: the owned process confirms exit and the outcome is cancelled 7ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when synthesis is malformed, and never forwards rejected output 12ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > keeps the outcome when final-status.json cannot be written, and republishes it on restart 14ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with claude drafting > fails cleanly when draft is truncated, and never forwards rejected output 8ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when draft is empty, and never forwards rejected output 5ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > ignores a duplicate submission (same idempotency key) 14ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when review is duplicate-final, and never forwards rejected output 7ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > refuses a start whose approval does not match the frozen packet 1ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > fails cleanly when review is missing-final, and never forwards rejected output 9ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > cancels during the review: the owned process confirms exit and the outcome is cancelled 7ms
+ ✓ tests/core/lifecycle.test.ts > lifecycle with codex drafting > a new attempt re-runs all three stages from the frozen packet and keeps the earlier attempt 19ms
+ ✓ tests/persist/round3.test.ts > Fix 2: one unreadable attempt never breaks the task view or the task list > a final attempt whose folder is unreadable shows its outcome with "cannot be checked right now"; everything else loads 2704ms
+ ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (claude drafting) > cancellation unconfirmed with a confirmed dispatch → restart → interrupted still requires acknowledgement before a retry 90ms
+ ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (claude drafting) > a crash after the dispatch was confirmed but before any result also requires acknowledgement 86ms
+ ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (claude drafting) > does not ask when every dispatched stage ended (result, confirmed stop, or explicit resolution) 88ms
+ ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (codex drafting) > cancellation unconfirmed with a confirmed dispatch → restart → interrupted still requires acknowledgement before a retry 42ms
+ ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (codex drafting) > a crash after the dispatch was confirmed but before any result also requires acknowledgement 62ms
+ ✓ tests/persist/round3.test.ts > Fix 2: one unreadable attempt never breaks the task view or the task list > a finalizing attempt (final-status.json not yet written) whose folder is unreadable: the task view and list still load 497ms
+ ✓ tests/core/review-findings.test.ts > finding 1 (High): retry after unconfirmed activity (codex drafting) > does not ask when every dispatched stage ended (result, confirmed stop, or explicit resolution) 71ms
+ ✓ tests/core/review-findings.test.ts > finding 2 (Medium): recovery reconciles records already marked published > quarantines a corrupted published record of a finished attempt; the outcome is unchanged and the record shows quarantined 24ms
+ ✓ tests/persist/round3.test.ts > Fix 3: outside-review recovery is isolated per save and per folder > an unreadable earlier save does not stop a healthy later one from being reconciled and its temporary file cleaned 381ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > success > gives exactly one outcome at every crash point, never changes a decided outcome, and never re-runs a stage 2510ms
+ ✓ tests/core/review-findings.test.ts > finding 2 (Medium): recovery reconciles records already marked published > republishes a missing final-status.json of an already-final attempt with the same bytes and outcome 13ms
+ ✓ tests/core/review-findings.test.ts > finding 2 (Medium): recovery reconciles records already marked published > a changed final-status.json of a final attempt is quarantined and replaced with the recorded bytes 14ms
+ ✓ tests/core/review-findings.test.ts > finding 2 (Medium): recovery reconciles records already marked published > a published record corrupted while the attempt was running is quarantined and stays required (damaged, not intact) 20ms
+ ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > refuses "complete" with matching IDs when the published files cannot support it 4ms
+ ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines JSON null and settles interrupted without throwing 27ms
+ ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines a list and settles interrupted without throwing 61ms
+ ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines a null file entry and settles interrupted without throwing 17ms
+ ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines a file entry without a hash and settles interrupted without throwing 22ms
+ ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines files not a list and settles interrupted without throwing 18ms
+ ✓ tests/core/review-findings.test.ts > finding 3 (Medium): rule (b) never adopts an impossible or malformed final-status.json > quarantines not JSON and settles interrupted without throwing 15ms
+ ✓ tests/core/review-findings.test.ts > finding 4 (Medium): project identity is rechecked before every write > a RULES.md business change during a run blocks every later write; the attempt still gets exactly one outcome 33ms
+ ✓ tests/core/review-findings.test.ts > finding 4 (Medium): project identity is rechecked before every write > a folder path change also blocks writes 1ms
+ ✓ tests/core/review-findings.test.ts > re-review regression (Medium): a blocked project is still reconciled before its outcome is settled > a record published just before the crash stays required when recovery runs while blocked (claude drafting) 7ms
+ ✓ tests/core/review-findings.test.ts > re-review regression (Medium): a blocked project is still reconciled before its outcome is settled > a record published just before the crash stays required when recovery runs while blocked (codex drafting) 6ms
+ ✓ tests/core/review-findings.test.ts > re-review regression (Medium): a blocked project is still reconciled before its outcome is settled > a mismatched intended record is never counted as published while blocked, and is quarantined after the unblock 16ms
+ ✓ tests/core/review-findings.test.ts > re-review regression (Medium): a blocked project is still reconciled before its outcome is settled > an unadoptable final-status.json left while blocked is quarantined after the unblock, and the recorded bytes are published 24ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > review fails > gives exactly one outcome at every crash point, never changes a decided outcome, and never re-runs a stage 1365ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > a crash after final-status.json says complete but before the database records it keeps "complete" 98ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > shows dispatch as uncertain when the app stopped after dispatch started but before it was confirmed (C3) 59ms
+ ✓ tests/persist/folders.test.ts > choosing a test folder > accepts a plain folder with a fictional RULES.md 39ms
+ ✓ tests/persist/folders.test.ts > choosing a test folder > refuses a missing RULES.md, an unknown business, a link, a relative path, and this app's repository 56ms
+ ✓ tests/persist/folders.test.ts > choosing a test folder > refuses real business folder names wherever they appear (checked without touching them) 14ms
+ ✓ tests/persist/folders.test.ts > choosing a test folder > re-reads the path and RULES.md every time: a change is seen at once 10ms
+ ✓ tests/persist/folders.test.ts > real folder file access > works only inside app-records/ and lists folders without following symlinks 152ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > shows "prepared; not dispatched" when the app stopped after -sent.json but before dispatch started (C3) 19ms
+ ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > survives repeated crashes during recovery itself 451ms
+ ✓ tests/core/recovery.test.ts > recovery details > quarantines a mismatched record file and a leftover temporary file, and lists them as not valid records 15ms
+ ✓ tests/core/recovery.test.ts > recovery details > handles quarantine name collisions with -2, -3, and never replaces an earlier quarantine copy 1ms
+ ✓ tests/core/recovery.test.ts > recovery details > repeats a quarantine move after a crash: the move is atomic, so a repeat finds nothing left to move 1ms
+ ✓ tests/core/recovery.test.ts > recovery details > rule (b): adopts a consistent published final-status.json when the database has no outcome 14ms
+ ✓ tests/core/recovery.test.ts > recovery details > rule (b) refuses an inconsistent final-status.json, quarantines it and falls to (c) interrupted 16ms
+ ✓ tests/core/recovery.test.ts > recovery details > damage after completion never changes the outcome: "Complete — record damaged", before and after restart 11ms
+ ✓ tests/core/recovery.test.ts > recovery details > marks queued and running attempts interrupted at once, never resuming them 81ms
 stdout | tests/core/seed.test.ts > seeded showcase > produces every required state using the real (simulated) engine
 Example: made-up task, not started yet => 
 Example: complete, unresolved issues remain => Workflow complete — unresolved issues remain
@@ -331,147 +388,103 @@ Example: Complete — record damaged => Complete — record damaged
 Example: final-status.json not on disk => Complete — record damaged
 Example: Codex drafts, Claude reviews => Workflow complete — unresolved issues remain
 
- ✓ tests/core/seed.test.ts > seeded showcase > produces every required state using the real (simulated) engine 1520ms
- ✓ tests/persist/restart.test.ts > on real disk (codex drafting) > completes, writes all nine records, touches nothing outside app-records/, and survives a relaunch 426ms
- ✓ tests/persist/restart.test.ts > on real disk (codex drafting) > quitting while a stage runs: after the relaunch the attempt is interrupted, and a retry needs acknowledgement 291ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > review fails > gives exactly one outcome at every crash point, never changes a decided outcome, and never re-runs a stage 1399ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > a crash after final-status.json says complete but before the database records it keeps "complete" 171ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > shows dispatch as uncertain when the app stopped after dispatch started but before it was confirmed (C3) 49ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > shows "prepared; not dispatched" when the app stopped after -sent.json but before dispatch started (C3) 18ms
- ✓ tests/persist/sqlite.test.ts > SQLite store > creates the schema with a migration record and survives reopening 99ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (claude drafting) > survives repeated crashes during recovery itself 541ms
- ✓ tests/persist/sqlite.test.ts > SQLite store > a transaction that throws changes nothing, in memory or on disk 51ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > offers no way to delete anything 6ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > creates folders, writes a temporary file exclusively and publishes it with a no-replace move 104ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > never replaces an existing file: exclusive create and the publishing move both fail with EEXIST, and the temporary file is kept 50ms
- ✓ tests/persist/sqlite.test.ts > SQLite store > a crash before the transaction leaves none of it; a crash after leaves all of it 103ms
- ✓ tests/persist/sqlite.test.ts > SQLite store > a crash after some rows were already changed inside the SQL transaction rolls all of it back 30ms
- ✓ tests/persist/sqlite.test.ts > SQLite store > writes only changed rows, keeps order, and deletes removed rows 400ms
- ✓ tests/persist/sqlite.test.ts > SQLite store > refuses a store written by a newer schema 32ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > a destination created by another process after the temporary file was made is never replaced 172ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > refuses a symlink at the root, anywhere in the root path, at any folder level, and as a file 102ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > the root folder swapped after it was opened and checked cannot redirect the write (F2 check tied to the write handle) 85ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > a folder below the root swapped after it was opened cannot redirect the write either 92ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > moves only a regular file: a folder, a symlink or a FIFO at the source name is refused and left where it is 165ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > moves into quarantine across two folder handles without replacing anything 50ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > rejects names that are not a single plain component 6ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > reads regular files only: a FIFO is refused at once without hanging, and size is limited 85ms
- ✓ tests/persist/native.test.ts > safe_publish native helper > reports a permission error with its code and the name 7ms
- ✓ tests/persist/folders.test.ts > choosing a test folder > accepts a plain folder with a fictional RULES.md 208ms
- ✓ tests/persist/folders.test.ts > choosing a test folder > refuses a missing RULES.md, an unknown business, a link, a relative path, and this app's repository 115ms
- ✓ tests/persist/folders.test.ts > choosing a test folder > refuses real business folder names wherever they appear (checked without touching them) 13ms
- ✓ tests/persist/folders.test.ts > choosing a test folder > re-reads the path and RULES.md every time: a change is seen at once 7ms
- ✓ tests/persist/folders.test.ts > real folder file access > works only inside app-records/ and lists folders without following symlinks 219ms
- ✓ tests/core/records.test.ts > C2: required record files for every outcome > complete and needs attention require all nine 56ms
- ✓ tests/core/records.test.ts > C2: required record files for every outcome > failed, cancelled and interrupted require final-status.json plus exactly the frozen list 3ms
- ✓ tests/core/records.test.ts > C2: required record files for every outcome > rejects inconsistent lists (a gap, or complete without every stage) 4ms
- ✓ tests/core/records.test.ts > C2: required record files for every outcome > each real outcome publishes exactly its required files (claude drafting) 466ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > success > gives exactly one outcome at every crash point, never changes a decided outcome, and never re-runs a stage 3569ms
- ✓ tests/core/records.test.ts > C2: required record files for every outcome > each real outcome publishes exactly its required files (codex drafting) 215ms
- ✓ tests/core/records.test.ts > C2: required record files for every outcome > a cancelled attempt requires what was published before cancellation 19ms
- ✓ tests/core/records.test.ts > F5 inventory > lists record files, outside reviews, temporary leftovers and quarantine content exactly, with full paths 69ms
- ✓ tests/core/outside.test.ts > outside reviews (F4) > saves numbered files with the fixed first line, never as a provider stage 100ms
- ✓ tests/core/outside.test.ts > outside reviews (F4) > moves to the next number when the numbered name already exists 2ms
- ✓ tests/core/outside.test.ts > outside reviews (F4) > recovers a crash after the no-replace move, before the database records it 61ms
- ✓ tests/core/outside.test.ts > outside reviews (F4) > recovers a crash before the link as "not saved" and asks for the paste again 52ms
- ✓ tests/core/outside.test.ts > outside reviews (F4) > recovers a crash after the database records published (leftover temp file of a successful save is quarantined) 11ms
- ✓ tests/core/outside.test.ts > outside reviews (F4) > shows a published save whose file was changed or removed as damaged, with mismatched content quarantined 6ms
- ✓ tests/core/outside.test.ts > outside reviews (F4) > survives a crash during the quarantine move and repeats it safely 23ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > review fails > gives exactly one outcome at every crash point, never changes a decided outcome, and never re-runs a stage 1639ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > a crash after final-status.json says complete but before the database records it keeps "complete" 237ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > shows dispatch as uncertain when the app stopped after dispatch started but before it was confirmed (C3) 34ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > shows "prepared; not dispatched" when the app stopped after -sent.json but before dispatch started (C3) 62ms
- ✓ tests/core/projects.test.ts > F2 projects > refuses a second project for the same folder or the same business, a RULES.md mismatch, and a missing RULES.md 104ms
- ✓ tests/core/recovery.test.ts > crash at every boundary (codex drafting) > survives repeated crashes during recovery itself 399ms
- ✓ tests/core/projects.test.ts > F2 projects > blocks a project whose RULES.md business line changed, until it is registered again 20ms
- ✓ tests/core/projects.test.ts > F2 projects > archived projects cannot start tasks 4ms
- ✓ tests/core/projects.test.ts > F2 projects > a task can use sources from its own project folder only 1ms
- ✓ tests/core/projects.test.ts > F2 projects > keeps project records in their own clone: project A writes nothing into project B 120ms
- ✓ tests/core/recovery.test.ts > recovery details > quarantines a mismatched record file and a leftover temporary file, and lists them as not valid records 17ms
- ✓ tests/core/recovery.test.ts > recovery details > handles quarantine name collisions with -2, -3, and never replaces an earlier quarantine copy 1ms
- ✓ tests/core/recovery.test.ts > recovery details > repeats a quarantine move after a crash: the move is atomic, so a repeat finds nothing left to move 1ms
- ✓ tests/core/recovery.test.ts > recovery details > rule (b): adopts a consistent published final-status.json when the database has no outcome 13ms
- ✓ tests/core/recovery.test.ts > recovery details > rule (b) refuses an inconsistent final-status.json, quarantines it and falls to (c) interrupted 98ms
- ✓ tests/core/projects.test.ts > F6 deleting > removes only the app records and leaves the clone byte-for-byte unchanged 43ms
- ✓ tests/core/projects.test.ts > F6 deleting > blocks deletion while an attempt is running 23ms
- ✓ tests/core/projects.test.ts > operation layer (what the renderer can call) > rejects unknown operations and malformed or oversized input 15ms
- ✓ tests/core/projects.test.ts > operation layer (what the renderer can call) > derives ownership from stored records: a project ID from the renderer cannot reach another project 2ms
- ✓ tests/core/projects.test.ts > operation layer (what the renderer can call) > refuses a drafter equal to the reviewer by construction: the reviewer is always the other provider 8ms
- ✓ tests/core/projects.test.ts > operation layer (what the renderer can call) > names the actual providers in order on the sharing screen, for both role orders (R4) 3ms
- ✓ tests/core/recovery.test.ts > recovery details > damage after completion never changes the outcome: "Complete — record damaged", before and after restart 38ms
- ✓ tests/core/recovery.test.ts > recovery details > marks queued and running attempts interrupted at once, never resuming them 85ms
- ✓ tests/static/boundaries.test.ts > source boundaries > never starts a process, opens a network connection, or uses git 204ms
- ✓ tests/static/boundaries.test.ts > source boundaries > never writes with node:fs; reads only the built renderer (main) and resolves the test folder path (real-folder) 120ms
- ✓ tests/static/boundaries.test.ts > source boundaries > never references the real business folders or repositories, except to refuse them 142ms
- ✓ tests/static/boundaries.test.ts > source boundaries > the native helper offers only the F3 operations (no delete, plain rename, overwrite, truncate, process or network calls) 20ms
- ✓ tests/static/boundaries.test.ts > source boundaries > only the main process and the persistence layer load the native helper; the interface never does 14ms
- ✓ tests/static/boundaries.test.ts > source boundaries > never renders generated content as HTML 3ms
- ✓ tests/static/boundaries.test.ts > source boundaries > has no Apply, Merge or Approve changes controls 76ms
+ ✓ tests/core/seed.test.ts > seeded showcase > produces every required state using the real (simulated) engine 1372ms
+ ✓ tests/static/boundaries.test.ts > source boundaries > never starts a process, opens a network connection, or uses git 139ms
+ ✓ tests/static/boundaries.test.ts > source boundaries > never writes with node:fs; reads only the built renderer (main) and resolves the test folder path (real-folder) 12ms
+ ✓ tests/static/boundaries.test.ts > source boundaries > never references the real business folders or repositories, except to refuse them 79ms
+ ✓ tests/static/boundaries.test.ts > source boundaries > the native helper offers only the F3 operations (no delete, plain rename, overwrite, truncate, process or network calls) 6ms
+ ✓ tests/static/boundaries.test.ts > source boundaries > only the main process and the persistence layer load the native helper; the interface never does 8ms
+ ✓ tests/static/boundaries.test.ts > source boundaries > never renders generated content as HTML 2ms
+ ✓ tests/static/boundaries.test.ts > source boundaries > has no Apply, Merge or Approve changes controls 3ms
  ✓ tests/static/boundaries.test.ts > preload > exposes exactly the allow-listed operations, plus onChanged 1ms
  ✓ tests/static/boundaries.test.ts > preload > exposes no generic IPC, filesystem, process or event object 2ms
- ✓ tests/static/boundaries.test.ts > Electron security settings > uses contextIsolation, sandbox, no node integration and web security 43ms
- ✓ tests/static/boundaries.test.ts > Electron security settings > has a restrictive CSP with no remote scripts or unsafe evaluation 4ms
- ✓ tests/static/boundaries.test.ts > Electron security settings > serves only files inside the built renderer folder 4ms
+ ✓ tests/static/boundaries.test.ts > Electron security settings > uses contextIsolation, sandbox, no node integration and web security 3ms
+ ✓ tests/static/boundaries.test.ts > Electron security settings > has a restrictive CSP with no remote scripts or unsafe evaluation 1ms
+ ✓ tests/static/boundaries.test.ts > Electron security settings > serves only files inside the built renderer folder 2ms
  ✓ tests/static/boundaries.test.ts > Electron security settings > allows requests only to the app origin 1ms
  ✓ tests/static/boundaries.test.ts > Electron security settings > accepts IPC only from the app window's main frame on the app origin 1ms
- ✓ tests/static/boundaries.test.ts > Electron security settings > main process denies navigation, new windows, webviews, downloads and permissions, and validates the sender 4ms
- ✓ tests/core/state-machine.test.ts > attempt state machine > has the happy path queued → drafting → reviewing → synthesizing → validating → complete 15ms
- ✓ tests/core/state-machine.test.ts > attempt state machine > includes needs attention as an outcome of validating (C2) 9ms
- ✓ tests/core/state-machine.test.ts > attempt state machine > has failed, cancelling, cancelled and interrupted as explicit alternatives from every running stage 6ms
- ✓ tests/core/state-machine.test.ts > attempt state machine > never leaves a terminal state (late or duplicate events cannot change it) 57ms
+ ✓ tests/static/boundaries.test.ts > Electron security settings > main process denies navigation, new windows, webviews, downloads and permissions, and validates the sender 1ms
+ ✓ tests/ui/app.test.tsx > simulated app interface > shows the simulation banner on every screen 3502ms
+ ✓ tests/core/outside.test.ts > outside reviews (F4) > saves numbered files with the fixed first line, never as a provider stage 103ms
+ ✓ tests/core/outside.test.ts > outside reviews (F4) > moves to the next number when the numbered name already exists 3ms
+ ✓ tests/core/outside.test.ts > outside reviews (F4) > recovers a crash after the no-replace move, before the database records it 5ms
+ ✓ tests/core/outside.test.ts > outside reviews (F4) > recovers a crash before the link as "not saved" and asks for the paste again 3ms
+ ✓ tests/core/outside.test.ts > outside reviews (F4) > recovers a crash after the database records published (leftover temp file of a successful save is quarantined) 5ms
+ ✓ tests/core/outside.test.ts > outside reviews (F4) > shows a published save whose file was changed or removed as damaged, with mismatched content quarantined 55ms
+ ✓ tests/core/outside.test.ts > outside reviews (F4) > survives a crash during the quarantine move and repeats it safely 3ms
+ ✓ tests/core/records.test.ts > C2: required record files for every outcome > complete and needs attention require all nine 22ms
+ ✓ tests/core/records.test.ts > C2: required record files for every outcome > failed, cancelled and interrupted require final-status.json plus exactly the frozen list 2ms
+ ✓ tests/core/records.test.ts > C2: required record files for every outcome > rejects inconsistent lists (a gap, or complete without every stage) 1ms
+ ✓ tests/core/records.test.ts > C2: required record files for every outcome > each real outcome publishes exactly its required files (claude drafting) 155ms
+ ✓ tests/core/records.test.ts > C2: required record files for every outcome > each real outcome publishes exactly its required files (codex drafting) 57ms
+ ✓ tests/core/records.test.ts > C2: required record files for every outcome > a cancelled attempt requires what was published before cancellation 6ms
+ ✓ tests/core/records.test.ts > F5 inventory > lists record files, outside reviews, temporary leftovers and quarantine content exactly, with full paths 33ms
+ ✓ tests/ui/persistent.test.tsx > persistent mode interface > chooses a test folder through the main-process picker, registers it, runs a task and writes real records 4385ms
+ ✓ tests/core/projects.test.ts > F2 projects > refuses a second project for the same folder or the same business, a RULES.md mismatch, and a missing RULES.md 13ms
+ ✓ tests/core/projects.test.ts > F2 projects > blocks a project whose RULES.md business line changed, until it is registered again 6ms
+ ✓ tests/core/projects.test.ts > F2 projects > archived projects cannot start tasks 6ms
+ ✓ tests/core/projects.test.ts > F2 projects > a task can use sources from its own project folder only 4ms
+ ✓ tests/core/projects.test.ts > F2 projects > keeps project records in their own clone: project A writes nothing into project B 34ms
+ ✓ tests/core/projects.test.ts > F6 deleting > removes only the app records and leaves the clone byte-for-byte unchanged 30ms
+ ✓ tests/core/projects.test.ts > F6 deleting > blocks deletion while an attempt is running 3ms
+ ✓ tests/core/projects.test.ts > operation layer (what the renderer can call) > rejects unknown operations and malformed or oversized input 18ms
+ ✓ tests/core/state-machine.test.ts > attempt state machine > has the happy path queued → drafting → reviewing → synthesizing → validating → complete 11ms
+ ✓ tests/core/state-machine.test.ts > attempt state machine > includes needs attention as an outcome of validating (C2) 3ms
+ ✓ tests/core/state-machine.test.ts > attempt state machine > has failed, cancelling, cancelled and interrupted as explicit alternatives from every running stage 1ms
+ ✓ tests/core/state-machine.test.ts > attempt state machine > never leaves a terminal state (late or duplicate events cannot change it) 20ms
  ✓ tests/core/state-machine.test.ts > attempt state machine > cannot skip stages 1ms
- ✓ tests/core/state-machine.test.ts > attempt state machine > treats cancellation unconfirmed as active (blocks retry and deletion) 2ms
- ✓ tests/ui/app.test.tsx > simulated app interface > shows the simulation banner on every screen 5999ms
- ✓ tests/ui/app.test.tsx > simulated app interface > lists the two fictional projects and refuses a second project for the same business 1134ms
- ✓ tests/ui/persistent.test.tsx > persistent mode interface > chooses a test folder through the main-process picker, registers it, runs a task and writes real records 8228ms
- ✓ tests/ui/app.test.tsx > simulated app interface > composer defaults to Claude drafting and Codex reviewing; switching shows the other order on the sharing preview 1000ms
- ✓ tests/ui/app.test.tsx > simulated app interface > creates a task, shows the sharing screen, runs it and shows three provider-labelled outputs with export-only wording 3332ms
- ✓ tests/ui/app.test.tsx > simulated app interface > shows every outcome and record-state display from the showcase tasks 5527ms
- ✓ tests/ui/app.test.tsx > simulated app interface > shows the sharing screen for the Codex-drafts role order 1797ms
- ✓ tests/ui/app.test.tsx > simulated app interface > shows the F5 inventory with its warning, and saves a pasted outside review 1194ms
- ✓ tests/ui/app.test.tsx > simulated app interface > cancels a running attempt from the interface 2028ms
- ✓ tests/ui/app.test.tsx > simulated app interface > simulated crash and restart marks running work interrupted, through the interface 2032ms
- ✓ tests/ui/app.test.tsx > simulated app interface > shows the connection page as simulated and every checklist row unverified 1284ms
- ✓ tests/persist/restart.test.ts > crash at every boundary, then a real relaunch (claude drafting) > gives exactly one outcome, never changes a decided outcome, never re-runs a stage, and leaves no temporary file 43749ms
- ✓ tests/persist/restart.test.ts > crash at every boundary, then a real relaunch (codex drafting) > gives exactly one outcome, never changes a decided outcome, never re-runs a stage, and leaves no temporary file 28317ms
- ✓ tests/persist/restart.test.ts > C1 on real disk > republishes the exact final-status.json bytes kept with the outcome, never rebuilding the file list from disk 333ms
- ✓ tests/persist/restart.test.ts > outside changes to a real folder > a record changed outside the app shows "Complete — record damaged", and the next start quarantines it without changing the outcome 179ms
- ✓ tests/persist/restart.test.ts > outside changes to a real folder > a RULES.md change during a run blocks every later write into the real folder; after restoring it, the next start finishes the record 206ms
- ✓ tests/persist/restart.test.ts > outside changes to a real folder > a symlink planted where the task folder goes: the write is refused with the path, and nothing is written elsewhere 25ms
- ✓ tests/persist/restart.test.ts > outside changes to a real folder > outside reviews are saved as real files, survive a relaunch, and removing the task leaves the folder byte for byte unchanged 153ms
- ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > finding 2: the root folder swapped for an impostor with a matching RULES.md mid-run gets nothing written to it 194ms
- ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > finding 3: a FIFO and an oversized file in place of records do not hang or stop start-up recovery for other attempts 354ms
- ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > finding 1: a failed move never deletes anything: the app's own temporary file is moved to quarantine 124ms
- ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > finding 1: a pre-existing .tmp- name the app did not create is never touched 81ms
- ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > new finding 2: a move that succeeds but whose flush fails is still counted as published 179ms
- ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > new finding 2: recovery adopts a record recorded "not published" whose file is in place with the planned content 123ms
- ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > new finding 3: an attempt whose folder cannot be read is not settled on a partial picture; it waits, blocks retry, and settles once readable 236ms
- ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > new finding 4: a store from the first persistence v1 build migrates without losing history, and the folder is confirmed once 228ms
- ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > F4 on real disk: a crash at each outside-review boundary, then a relaunch, leaves a consistent save and no temporary file 555ms
- ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > repeated crashes during start-up recovery itself, on real disk 5526ms
- ✓ tests/persist/kill.test.ts > SIGKILL at every boundary (claude drafting, success) > relaunch gives exactly one outcome, intact records, no temporary file, and dispatches nothing 86671ms
- ✓ tests/persist/kill.test.ts > SIGKILL at every boundary (codex drafting, success) > relaunch gives exactly one outcome, intact records, no temporary file, and dispatches nothing 40719ms
- ✓ tests/persist/kill.test.ts > SIGKILL at every boundary (claude drafting, review-fails) > relaunch gives exactly one outcome, intact records, no temporary file, and dispatches nothing 26036ms
- ✓ tests/persist/kill.test.ts > SIGKILL during an outside-review save (F4) > relaunch leaves exactly one consistent save state and no temporary file, at every boundary 1912ms
- ✓ tests/persist/kill.test.ts > SIGKILL during start-up recovery itself > a second relaunch still gives exactly one outcome, an intact record and no temporary file 8887ms
+ ✓ tests/core/state-machine.test.ts > attempt state machine > treats cancellation unconfirmed as active (blocks retry and deletion) 0ms
+ ✓ tests/core/projects.test.ts > operation layer (what the renderer can call) > derives ownership from stored records: a project ID from the renderer cannot reach another project 1ms
+ ✓ tests/core/projects.test.ts > operation layer (what the renderer can call) > refuses a drafter equal to the reviewer by construction: the reviewer is always the other provider 3ms
+ ✓ tests/core/projects.test.ts > operation layer (what the renderer can call) > names the actual providers in order on the sharing screen, for both role orders (R4) 1ms
+ ✓ tests/ui/app.test.tsx > simulated app interface > lists the two fictional projects and refuses a second project for the same business 1331ms
+ ✓ tests/ui/app.test.tsx > simulated app interface > composer defaults to Claude drafting and Codex reviewing; switching shows the other order on the sharing preview 813ms
+ ✓ tests/ui/app.test.tsx > simulated app interface > creates a task, shows the sharing screen, runs it and shows three provider-labelled outputs with export-only wording 1636ms
+ ✓ tests/ui/app.test.tsx > simulated app interface > shows every outcome and record-state display from the showcase tasks 3387ms
+ ✓ tests/ui/app.test.tsx > simulated app interface > shows the sharing screen for the Codex-drafts role order 749ms
+ ✓ tests/ui/app.test.tsx > simulated app interface > shows the F5 inventory with its warning, and saves a pasted outside review 1582ms
+ ✓ tests/ui/app.test.tsx > simulated app interface > cancels a running attempt from the interface 1369ms
+ ✓ tests/ui/app.test.tsx > simulated app interface > simulated crash and restart marks running work interrupted, through the interface 986ms
+ ✓ tests/ui/app.test.tsx > simulated app interface > shows the connection page as simulated and every checklist row unverified 400ms
+ ✓ tests/persist/restart.test.ts > crash at every boundary, then a real relaunch (claude drafting) > gives exactly one outcome, never changes a decided outcome, never re-runs a stage, and leaves no temporary file 29750ms
+ ✓ tests/persist/restart.test.ts > crash at every boundary, then a real relaunch (codex drafting) > gives exactly one outcome, never changes a decided outcome, never re-runs a stage, and leaves no temporary file 23498ms
+ ✓ tests/persist/restart.test.ts > C1 on real disk > republishes the exact final-status.json bytes kept with the outcome, never rebuilding the file list from disk 206ms
+ ✓ tests/persist/restart.test.ts > outside changes to a real folder > a record changed outside the app shows "Complete — record damaged", and the next start quarantines it without changing the outcome 149ms
+ ✓ tests/persist/restart.test.ts > outside changes to a real folder > a RULES.md change during a run blocks every later write into the real folder; after restoring it, the next start finishes the record 192ms
+ ✓ tests/persist/restart.test.ts > outside changes to a real folder > a symlink planted where the task folder goes: the write is refused with the path, and nothing is written elsewhere 20ms
+ ✓ tests/persist/restart.test.ts > outside changes to a real folder > outside reviews are saved as real files, survive a relaunch, and removing the task leaves the folder byte for byte unchanged 173ms
+ ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > finding 2: the root folder swapped for an impostor with a matching RULES.md mid-run gets nothing written to it 171ms
+ ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > finding 3: a FIFO and an oversized file in place of records do not hang or stop start-up recovery for other attempts 416ms
+ ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > finding 1: a failed move never deletes anything: the app's own temporary file is moved to quarantine 231ms
+ ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > finding 1: a pre-existing .tmp- name the app did not create is never touched 95ms
+ ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > new finding 2: a move that succeeds but whose flush fails is still counted as published 127ms
+ ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > new finding 2: recovery adopts a record recorded "not published" whose file is in place with the planned content 98ms
+ ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > new finding 3: an attempt whose folder cannot be read is not settled on a partial picture; it waits, blocks retry, and settles once readable 174ms
+ ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > new finding 4: a store from the first persistence v1 build migrates without losing history, and the folder is confirmed once 1768ms
+ ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > F4 on real disk: a crash at each outside-review boundary, then a relaunch, leaves a consistent save and no temporary file 479ms
+ ✓ tests/persist/restart.test.ts > Codex review of persistence v1: regression tests > repeated crashes during start-up recovery itself, on real disk 3778ms
+ ✓ tests/persist/kill.test.ts > SIGKILL at every boundary (claude drafting, success) > relaunch gives exactly one outcome, intact records, no temporary file, and dispatches nothing 56611ms
+ ✓ tests/persist/kill.test.ts > SIGKILL at every boundary (codex drafting, success) > relaunch gives exactly one outcome, intact records, no temporary file, and dispatches nothing 36107ms
+ ✓ tests/persist/kill.test.ts > SIGKILL at every boundary (claude drafting, review-fails) > relaunch gives exactly one outcome, intact records, no temporary file, and dispatches nothing 20413ms
+ ✓ tests/persist/kill.test.ts > SIGKILL during an outside-review save (F4) > relaunch leaves exactly one consistent save state and no temporary file, at every boundary 1480ms
+ ✓ tests/persist/kill.test.ts > SIGKILL during start-up recovery itself > a second relaunch still gives exactly one outcome, an intact record and no temporary file 7345ms
 
- Test Files  17 passed (17)
-      Tests  208 passed (208)
-   Start at  02:24:56
-   Duration  167.12s (tests 93%, environment 4%, import 2%, transform 1%)
+ Test Files  18 passed (18)
+      Tests  220 passed (220)
+   Start at  16:50:07
+   Duration  124.23s (tests 92%, environment 3%, import 3%, transform 2%)
 
-exit: 0
+exit 0
 ```
 
 ### Electron smoke test output, persistent (verbatim)
 
 ```
-[8336:1107/022805.365251:ERROR:base/process/process_mac.cc:98] task_policy_set TASK_SUPPRESSION_POLICY: (os/kern) invalid argument (4)
-SMOKE-PERSIST {"phase":"run","electron":"44.9.3","attemptA":"a-e385f02db9144437","stateA":"complete","attemptB":"a-1952355c2b9411be","stateB":"reviewing","filesA":["1-draft-sent.json","1-draft.md","2-review-sent.json","2-review.md","3-synthesis-sent.json","3-synthesis.md","final-status.json","packet.md","sharing-plan.json"]}
+SMOKE-PERSIST {"phase":"run","electron":"44.9.3","attemptA":"a-105dfe8c72310472","stateA":"complete","attemptB":"a-a3bef3fafd2877ef","stateB":"reviewing","filesA":["1-draft-sent.json","1-draft.md","2-review-sent.json","2-review.md","3-synthesis-sent.json","3-synthesis.md","final-status.json","packet.md","sharing-plan.json"]}
   ok: launch 1: attempt A completed
   ok: launch 1: attempt A has nine record files
   ok: launch 1: quit while attempt B was reviewing
-SMOKE-PERSIST {"phase":"verify","electron":"44.9.3","page":{"banner":true,"persistentNote":true,"projectRows":1},"projects":1,"tasks":2,"attempts":[{"id":"a-e385f02db9144437","state":"complete","final":true,"record":"intact","unresolved":[]},{"id":"a-1952355c2b9411be","state":"interrupted","final":true,"record":"intact","unresolved":["review"]}]}
+SMOKE-PERSIST {"phase":"verify","electron":"44.9.3","page":{"banner":true,"persistentNote":true,"projectRows":1},"projects":1,"tasks":2,"attempts":[{"id":"a-105dfe8c72310472","state":"complete","final":true,"record":"intact","unresolved":[]},{"id":"a-a3bef3fafd2877ef","state":"interrupted","final":true,"record":"intact","unresolved":["review"]}]}
   ok: launch 2: project and both tasks survived the relaunch
   ok: launch 2: attempt A still complete, record intact
   ok: launch 2: attempt B interrupted by start-up recovery, record intact
@@ -481,15 +494,15 @@ SMOKE-PERSIST {"phase":"verify","electron":"44.9.3","page":{"banner":true,"persi
   ok: test folder holds only RULES.md and app-records/
   ok: RULES.md unchanged
 SMOKE-PERSIST PASSED
-exit: 0
+exit 0
 ```
 
 ### Electron smoke test output, showcase (verbatim)
 
 ```
-SMOKE {"banner":true,"hasRequire":false,"hasProcess":false,"heloKeys":["archiveProject","cancelAttempt","chooseTestFolder","confirmFolderIdentity","createTask","deleteProject","deleteTask","exportArtifacts","getConnection","getEvents","getInventory","getMode","getTask","listProjects","listScenarios","listSimFolders","listTasks","onChanged","previewSharing","registerProject","renameProject","resolveCancellation","saveOutsideReview","simulateCrashAndRestart","simulateDamage","startAttempt"],"projects":2,"windowOpenResult":"denied","evalBlocked":true,"fetchBlocked":true,"notificationPermission":"denied","badInputRejected":true,"locationAfterNavigationAttempt":"app://helo/index.html","windowsBefore":1,"windowsAfter":1,"contextIsolation":true,"sandbox":true,"nodeIntegration":false,"webSecurity":true,"electron":"44.9.3"}
+SMOKE {"banner":true,"hasRequire":false,"hasProcess":false,"heloKeys":["archiveProject","cancelAttempt","chooseTestFolder","confirmFolderChecked","confirmFolderIdentity","createTask","deleteProject","deleteTask","exportArtifacts","getConnection","getEvents","getInventory","getMode","getTask","listProjects","listScenarios","listSimFolders","listTasks","onChanged","previewSharing","registerProject","renameProject","resolveCancellation","saveOutsideReview","simulateCrashAndRestart","simulateDamage","startAttempt"],"projects":2,"windowOpenResult":"denied","evalBlocked":true,"fetchBlocked":true,"notificationPermission":"denied","badInputRejected":true,"locationAfterNavigationAttempt":"app://helo/index.html","windowsBefore":1,"windowsAfter":1,"contextIsolation":true,"sandbox":true,"nodeIntegration":false,"webSecurity":true,"electron":"44.9.3"}
 SMOKE PASSED
-exit: 0
+exit 0
 ```
 
 ## 4. What was not done
@@ -504,7 +517,7 @@ exit: 0
 - **The plan's tables `context_sources`, `task_context_snapshots`, `provider_runs` and `transmission_manifests`** don't exist under those names. Snapshots live inside the task row, and the dispatch journal and artifacts tables cover runs and manifests.
 
 **Not verified:**
-- **Two programs writing into the same test folder at once.** The app never deletes anything, and every check runs on its own handles, but no test runs a hostile second program racing it. Such a program could still change or remove files itself; the app only guarantees it won't destroy or replace anything on its behalf.
+- **Two programs writing into the same test folder at once.** The app never deletes anything, and every check runs on its own handles. A swap at the exact instant of a move is staged in tests through a test-only hook inside the native move (round 3), not by a second program racing it in real time. A hostile program under Ahmed's account is outside the threat model (plan revision 9): it could change or remove files itself. The app only guarantees it won't replace or delete anything on its behalf, will never count a swapped-in entry as published, and blocks the project when it detects one.
 - **A real full disk** can't be produced on demand, so disk-full is still simulated by injecting the error. Real permission errors are tested.
 - **Durability against power loss** isn't something a test can prove. The code requests `F_FULLFSYNC` for record files and folders, and SQLite runs with `synchronous = FULL` and `fullfsync = ON`. Tests turn off the full flush for speed but keep ordinary `fsync`; the app keeps it on.
 - **Electron security guidance** was again not re-checked online, and Electron fuses and the packaged build are still untested, since packaging is out of scope.
@@ -549,14 +562,44 @@ Codex also confirmed:
 | Finding 3 | PARTLY RESOLVED | See new findings 2 and 3 below. |
 | Finding 5 | PARTLY RESOLVED | See new finding 5 below. |
 | Finding 6 | PARTLY RESOLVED (handoff to Omar, not yet adopted) | Unchanged by design: C1 is settled once Omar adopts the wording in `docs/Plan-Amendment-Persistence-v1.md`. |
-| New 1, High | The move could relocate a folder swapped in at the source name. | The move now accepts only a regular file, checked through a handle that is held across the move. The moved entry is verified to be that same file; anything swapped in is moved straight back. A test covers a folder, a symlink and a FIFO at the source. A genuinely concurrent swap at the exact moment of the move can't be staged reliably in a test; the move-back path is covered by code review only. |
+| New 1, High | The move could relocate a folder swapped in at the source name. | The move now accepts only a regular file, checked through a handle that is held across the move. The moved entry is verified to be that same file. A test covers a folder, a symlink and a FIFO at the source. (This row originally said a swapped-in entry is "moved straight back". That was too strong: the move back can fail, or the app can be killed before it. Round 3 corrects the claim and adds block and warn.) |
 | New 2, Medium | A move that succeeded but whose flush failed was recorded as "not published". | Moving and flushing are now separate steps. A flush failure after a successful move counts the record as published and notes the problem. Recovery also adopts a record marked "not published" whose file is in place with the planned content, before any outcome is decided. Both are tested. |
 | New 3, Medium | Recovery could freeze an outcome after an incomplete check, or leave an attempt stuck. | Each attempt is reconciled and settled on its own. If its files can't be fully checked, it isn't settled at all: it is marked "recovery pending" (shown in the task view, retry blocked) and tried again on every start. A test makes one attempt's folder unreadable: the other attempt is recovered, this one waits, and once the folder is readable again it settles with the correct file list. Listing a folder no longer walks unrelated attempt folders, so one unreadable folder can't affect another attempt. |
 | New 4, Medium | Projects saved by the first persistence build had no folder identity and lost write access, with no safe way back. | The store schema is now version 2. Version-1 stores are migrated with the identity marked unconfirmed, and history is kept. A **Confirm folder** button on the Projects page records the identity once, after the same checks (same path, `RULES.md` naming the same business). Tested on a store converted back to version 1. |
 | New 5, Medium | Tests and claims. | Added SIGKILL tests for the move-to-flush window, outside-review saves and recovery itself (51 more kills). The weak test is replaced by two real ones: a failed move moves the app's own temporary file to quarantine, and a pre-existing `.tmp-` name that the app didn't create is left untouched. This report no longer says everything is settled while C1 waits for Omar. |
 
-These second-round fixes haven't been reviewed by Codex yet.
+Codex reviewed these second-round fixes in round 3, below.
 
 ---
 
 The code is on branch `build/persistence-v1`, in local commits. Nothing is pushed or merged. A third Codex pass, over the second-round fixes and run by Ahmed, would confirm them.
+
+### Round 3 (review of `3a5f7ba`)
+
+Codex's third round left one High and two Medium issues. Omar checked all three against the code; all were real. Ahmed decided the High one in chat on 2026-11-08 ("Accept, block and warn"), and the plan says so in revision 9, "Threat model and the move limit" under F3. The fixes follow `docs/Build-Brief-Persistence-v1-Round3-Fixes.md`.
+
+**Detected versus prevented, stated plainly.**
+- **Prevented:** replacing anything. Every move is a no-replace move, the app never deletes anything, and the final name is never overwritten ("collision"). Writing into a project that is blocked, whether by the F2 checks or by a detected swap, is also prevented.
+- **Detected, not prevented:** a swap at the source name at the exact instant of a move. macOS moves whatever holds the name then; it cannot move "only this exact file". The app sees afterwards that the moved entry is not the file it checked, tries once to move it back, and reports which happened. If moving it back fails, or the app is killed between the two moves, the swapped-in entry may stay at the record name. It is never counted as published.
+- **Not protected against:** a deliberately hostile program running under Ahmed's own account (plan revision 9).
+
+| Issue | Severity | What was done |
+|---|---|---|
+| 1. The move back does not close the source-swap race. | High | Not closed, by Ahmed's decision; **block and warn** instead. (a) The native helper reports two distinct codes, `ESWAPPED_MOVED_BACK` and `ESWAPPED_NOT_MOVED_BACK`, for record writes, quarantine moves and outside-review saves. (b) On either, nothing from that write is published (the row is "not published", marked with the swap kind), and the attempt stops as failed by the normal F3 rule. In the same SQLite transaction the project is **blocked**: the block is stored on the project row, survives restarts, and stops every new task, attempt, outside-review save, quarantine move and record write, including `final-status.json`. Recovery still reads, but writes nothing. (c) The Projects page and the project page show the exact folder, both names, whether the entry was moved back, and "Check this folder. Something replaced a file while the app was saving it." (d) Only the **I have checked this folder** button (`confirmFolderChecked`) lifts the block. It is recorded in the store with the block it lifted and the time, and noted in the events. (e) Start-up recovery never counts an unexpected or non-regular entry at a record name as published. Such an entry left by a "not moved back" swap goes to quarantine if it is a regular file. Otherwise it is left in place, the row says so, and the F5 inventory lists it as "Not a regular file". (f) The "moved straight back" claims are gone from the C comments and this report. |
+| 2. One unreadable attempt broke `taskView` and `taskSummary` for the whole project. | Medium | Record state is computed per attempt. If an attempt's files can't be read, that attempt alone shows its outcome (from SQLite) with the record state **"cannot be checked right now"**, plus the path and the error, for example "Complete — record cannot be checked right now". Every other attempt and task still loads. The F5 inventory also no longer fails: if part of the task folder can't be read, it lists each folder on its own and shows the unreadable one as a row saying so, never as a silently shorter list. |
+| 3. Outside-review recovery stopped at the first unreadable save. | Medium | Each save, and each task's `outside/` folder clean-up, is recovered on its own. A failing one is noted, left as it is, and tried again on the next start; the others are reconciled and their temporary files moved to quarantine. Clean-up lists only each task's own `outside/` folder, not the whole `app-records/` tree. |
+
+**New tests** (`tests/persist/round3.test.ts`, 12, all on real temporary folders). The race is staged through a **test-only hook**: an optional callback the native move calls at "before-move" and "before-move-back". The test does the swap with ordinary file operations of its own. The app never passes the hook, the shipped helper contains no code that makes a swap, and its list of nine operations is unchanged.
+- native: "swapped, moved back" (a folder swapped in is back at its name; nothing at the record name; the app's file is moved aside, not deleted); "swapped, NOT moved back" (the folder stays at the record name); and no swap (the hook changes nothing);
+- engine, "moved back": the attempt fails, the record isn't published, and the project is blocked with the exact folder and names; `final-status.json` isn't written while blocked;
+- the block **survives a relaunch**; a new task, a new attempt (directly and through the service) and an outside-review save are **refused**, and recovery writes nothing while blocked; **the unblock is recorded**, survives the next relaunch, and that start finishes the record with the outcome unchanged;
+- engine, "NOT moved back", a folder: never counted as published, left in place after the unblock, listed in the inventory as "Not a regular file";
+- engine, "NOT moved back", a regular file: moved to quarantine on the first start after the unblock, not before;
+- a swap during an outside-review save: not saved, project blocked;
+- **recovery with a swapped-in folder at a record name** (the app killed between the two moves): not published, left in place, listed;
+- fix 2: a **final** attempt and a **finalizing** attempt (outcome decided, `final-status.json` not written) with unreadable folders: the task view, task list, task summary and inventory still load, and the other attempts show their real record state;
+- fix 3: an unreadable earlier outside-review save and a healthy later one: the later one is reconciled and its temporary file cleaned; the earlier one is reconciled on the next start once readable.
+
+All 208 earlier tests still pass unchanged, including the 408 process kills. The store needs no migration: the new fields are optional, and older rows read as "no block".
+
+**Still open:** C1's plan wording (finding 6) waits for Omar, unchanged. These round 3 fixes haven't been reviewed by Codex yet; Ahmed runs that next.

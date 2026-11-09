@@ -85,7 +85,9 @@ export interface RecordProblem {
 export type RecordState =
   | { kind: 'running' }
   | { kind: 'intact' }
-  | { kind: 'damaged'; problems: RecordProblem[] };
+  | { kind: 'damaged'; problems: RecordProblem[] }
+  /** The attempt's files cannot be read right now (an unreadable folder, a disk error). The outcome still shows, from the store. */
+  | { kind: 'unchecked'; path: string; error: string };
 
 /** Carried item C3: dispatch status, from the dispatch journal, shown separately from the -sent.json file. */
 export type DispatchStatus = 'not_prepared' | 'prepared_not_dispatched' | 'uncertain' | 'confirmed';
@@ -153,6 +155,17 @@ export interface SimFolderView {
   files: { path: string; bytes: number }[];
 }
 
+export interface SwapBlockView {
+  detectedAt: string;
+  folder: string;
+  sourceName: string;
+  destinationName: string;
+  movedBack: boolean;
+  during: 'record' | 'quarantine' | 'outside-review';
+  advice: string;
+  error: string;
+}
+
 export interface ProjectView {
   id: string;
   name: string;
@@ -165,6 +178,10 @@ export interface ProjectView {
   blocked: string | null;
   /** A real folder registered by an older version, waiting for Ahmed to confirm it. */
   identityUnconfirmed: boolean;
+  /** Plan revision 9: a detected swap blocks the project until Ahmed chooses "I have checked this folder". */
+  swapBlock: SwapBlockView | null;
+  /** How many swap blocks were lifted before, each recorded. */
+  swapBlocksLifted: number;
   taskCount: number;
 }
 
@@ -277,7 +294,7 @@ export interface OutsideReviewView {
   note: string | null;
 }
 
-export type InventoryKind = 'record' | 'outside-review' | 'temporary-leftover' | 'quarantine';
+export type InventoryKind = 'record' | 'outside-review' | 'temporary-leftover' | 'quarantine' | 'not-a-file' | 'unreadable';
 
 export interface InventoryEntry {
   path: string;

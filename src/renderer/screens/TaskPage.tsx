@@ -147,11 +147,11 @@ function AttemptCard({ a }: { a: AttemptView }) {
     <section className="section attempt" aria-label={`Attempt ${a.number}`} data-testid="attempt">
       <div className="attempt-head">
         <h2>Attempt {a.number}</h2>
-        <StatusBadge state={a.state} display={a.display} damaged={a.recordState.kind === 'damaged'} />
+        <StatusBadge state={a.state} display={a.display} damaged={a.recordState.kind === 'damaged' || a.recordState.kind === 'unchecked'} />
       </div>
       <p>
         <strong>Outcome:</strong> {a.outcome ? OUTCOME_LABEL[a.outcome] : 'not decided yet'}
-        {a.completionLabel && a.recordState.kind !== 'damaged' ? ` (${a.completionLabel})` : ''}
+        {a.completionLabel && a.recordState.kind !== 'damaged' && a.recordState.kind !== 'unchecked' ? ` (${a.completionLabel})` : ''}
       </p>
       <RecordStateView record={a.recordState} />
       {a.reason && <p className="reason">{a.reason}</p>}

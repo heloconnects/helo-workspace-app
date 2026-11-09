@@ -15,6 +15,36 @@ export interface ProjectRow {
   repoConfirmed: true;
   archived: boolean;
   registeredAt: string;
+  /**
+   * Plan revision 9, "block and warn": set when a write into this folder detected that something
+   * was swapped in at the file being saved. While set, no task and no write runs in this project.
+   * Only Ahmed lifts it, with the "I have checked this folder" action. Absent in older stores.
+   */
+  swapBlock?: SwapBlock | null;
+  /** Every lifted swap block, with when it was lifted. Never shortened. Absent in older stores. */
+  swapBlockHistory?: SwapBlockLifted[];
+}
+
+export interface SwapBlock {
+  detectedAt: string;
+  /** Absolute path of the folder the write went into. */
+  folder: string;
+  /** The name the entry was moved from (the app's temporary file, or a file being quarantined). */
+  sourceName: string;
+  /** The name it was moved to (a record name, a quarantine name, an outside-review name). */
+  destinationName: string;
+  /** True when the swapped-in entry was moved back to sourceName; false when it may still be at destinationName. */
+  movedBack: boolean;
+  during: 'record' | 'quarantine' | 'outside-review';
+  taskId: string | null;
+  attemptId: string | null;
+  error: string;
+}
+
+export interface SwapBlockLifted {
+  block: SwapBlock;
+  liftedAt: string;
+  action: 'I have checked this folder';
 }
 
 export interface TaskRow {
@@ -76,6 +106,8 @@ export interface RecordFileRow {
   plannedHash: string;
   state: RecordFileState;
   error: string | null;
+  /** Set when this write detected a swap (plan revision 9). Absent in older stores and for ordinary failures. */
+  swap?: 'moved-back' | 'not-moved-back';
 }
 
 export interface DispatchRow {

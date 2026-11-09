@@ -8,7 +8,10 @@
 
 import { sha256 } from '../core/hash.js';
 import { checkName, SimFsError, type CloneFs, type DirHandle } from '../core/sim-store.js';
-import { loadSafePublish, nativeCode, type SafePublish } from './native.js';
+import { loadSafePublish, nativeCode, type SafePublish, type SwapHookStage } from './native.js';
+
+/** Test-only: called inside a move so a test can stage a swap at the source name. */
+export type SwapHook = (stage: SwapHookStage, move: { folder: string; from: string; to: string }) => void;
 
 export const MAX_RECORD_BYTES = 16 * 1024 * 1024;
 
@@ -29,6 +32,8 @@ export class RealCloneFs implements CloneFs {
   private faults = new Map<string, { code: 'ENOSPC' | 'EACCES' | 'EIO'; remaining: number }>();
   /** Set when the folder is registered; until then every write is refused. */
   checkRoot: RootCheck = () => 'the folder is not registered as a project';
+  /** Test-only hook passed to the native move (see SafePublish.moveNoReplace). Never set by the app. */
+  swapHook: SwapHook | null = null;
 
   constructor(
     readonly root: string,
@@ -121,9 +126,37 @@ export class RealCloneFs implements CloneFs {
     return content === undefined ? undefined : sha256(content);
   }
 
-  /** Every entry under app-records/ whose path starts with the prefix (folders are walked, never followed). */
+  /** The test hook for one move, bound to its folder and names, or undefined. */
+  private hookFor(folder: string, from: string, to: string): ((stage: SwapHookStage) => void) | undefined {
+    const h = this.swapHook;
+    return h ? (stage) => h(stage, { folder: `${this.root}/${folder}`, from, to }) : undefined;
+  }
+
+  entryKind(path: string): 'file' | 'dir' | 'other' | null {
+    const { dir, name } = this.split(path);
+    const fd = this.tryOpen(dir);
+    if (fd === null) return null;
+    try {
+      return this.native.listDir(fd).find((e) => e.name === name)?.kind ?? null;
+    } catch (e) {
+      this.fail(e, dir);
+    } finally {
+      this.native.closeDir(fd);
+    }
+  }
+
+  /**
+   * Every entry under app-records/ whose path starts with the prefix (folders are walked, never
+   * followed). The app's own folders are app-records/<task>/<attempt or outside>/ and a
+   * quarantine/ folder inside those; any other folder (for example one swapped in at a record
+   * name) is listed as an entry itself, so the inventory shows it, and is not walked.
+   */
   list(prefix: string): string[] {
     const out: string[] = [];
+    const ownFolder = (p: string, name: string) => {
+      const depth = p.split('/').length;
+      return depth <= 3 || (depth === 4 && name === 'quarantine');
+    };
     const walk = (dir: string) => {
       const fd = this.tryOpen(dir);
       if (fd === null) return;
@@ -135,7 +168,8 @@ export class RealCloneFs implements CloneFs {
       }
       for (const e of entries) {
         const p = `${dir}/${e.name}`;
-        if (e.kind === 'dir') {
+        if (e.kind === 'dir' && !ownFolder(p, e.name)) out.push(p);
+        else if (e.kind === 'dir') {
           // Only walk folders on the way to, or inside, the requested prefix, so an unreadable folder
           // elsewhere (another attempt's) cannot affect this listing.
           if (prefix.startsWith(`${p}/`) || `${p}/`.startsWith(prefix)) walk(p);
@@ -174,7 +208,7 @@ export class RealCloneFs implements CloneFs {
       publish: (from, to, faultKey) => {
         this.fault(faultKey === undefined ? undefined : `move:${faultKey}`, at(to));
         try {
-          native.moveNoReplace(fd, checkName(from), fd, checkName(to));
+          native.moveNoReplace(fd, checkName(from), fd, checkName(to), this.hookFor(dir, from, to));
         } catch (e) {
           this.fail(e, at(to));
         }
@@ -201,7 +235,7 @@ export class RealCloneFs implements CloneFs {
     try {
       const qfd = this.openUnder(`${dir}/quarantine`, { create: true, forWrite: true });
       try {
-        this.native.moveNoReplace(fd, checkName(name), qfd, checkName(qName));
+        this.native.moveNoReplace(fd, checkName(name), qfd, checkName(qName), this.hookFor(dir, name, `quarantine/${qName}`));
       } catch (e) {
         this.fail(e, `${dir}/quarantine/${qName}`);
       } finally {

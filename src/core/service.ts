@@ -132,6 +132,19 @@ export class Service implements HeloApi {
       sources: this.ws.sourcesOf(p.id).map((s) => ({ sourceId: s.sourceId, path: s.path, bytes: byteLength(s.content) })),
       blocked: this.ws.projectBlock(p.id),
       identityUnconfirmed: f.kind === 'real' && !p.folderIdentity,
+      swapBlock: p.swapBlock
+        ? {
+            detectedAt: p.swapBlock.detectedAt,
+            folder: p.swapBlock.folder,
+            sourceName: p.swapBlock.sourceName,
+            destinationName: p.swapBlock.destinationName,
+            movedBack: p.swapBlock.movedBack,
+            during: p.swapBlock.during,
+            advice: 'Check this folder. Something replaced a file while the app was saving it.',
+            error: p.swapBlock.error,
+          }
+        : null,
+      swapBlocksLifted: (p.swapBlockHistory ?? []).length,
       taskCount: this.ws.t.tasks.filter((t) => t.projectId === p.id).length,
     };
   }
@@ -314,6 +327,11 @@ export class Service implements HeloApi {
     return this.wrap(() => this.projectView(this.ws.confirmFolderIdentity(str(obj(arg), 'projectId', LIMITS.id)).id));
   }
 
+  /** Ahmed's "I have checked this folder" action after a detected swap (plan revision 9). */
+  confirmFolderChecked(arg: unknown) {
+    return this.wrap(() => this.projectView(this.ws.liftSwapBlock(str(obj(arg), 'projectId', LIMITS.id)).id));
+  }
+
   deleteProject(arg: unknown) {
     return this.wrap(() => {
       this.ws.deleteProject(str(obj(arg), 'projectId', LIMITS.id));
@@ -414,7 +432,7 @@ export class Service implements HeloApi {
       return {
         taskId,
         root: `${fs.root}/${taskDir(taskId)}`,
-        entries: inventoryEntries(fs, taskId),
+        entries: inventoryEntries(fs, taskId, this.ws.attemptsOf(taskId).map((a) => a.id)),
         attempts: this.ws.attemptsOf(taskId).map((a) => {
           const v = this.attemptView(a.id);
           return { attemptId: a.id, number: a.number, display: v.display, recordState: v.recordState };
