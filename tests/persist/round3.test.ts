@@ -64,13 +64,15 @@ async function waitFor(cond: () => boolean, ms = 5000) {
 }
 
 /** A test-only swap: at the instant of the move of `target`, the app's file is moved aside and `swapIn` is put at its name. */
-function swapAt(target: string, swapIn: 'folder' | 'file', blockMoveBack: boolean): SwapHook {
+function swapAt(target: string, swapIn: 'folder' | 'file' | 'same-bytes', blockMoveBack: boolean): SwapHook {
   return (stage, m) => {
     if (m.to !== target) return;
     const src = path.join(m.folder, m.from);
     if (stage === 'before-move') {
+      const original = readFileSync(src);
       renameSync(src, `${src}-moved-aside-by-test`);
       if (swapIn === 'folder') mkdirSync(src);
+      else if (swapIn === 'same-bytes') writeFileSync(src, original); // another file, with exactly the app's bytes
       else writeFileSync(src, 'swapped in by the test\n');
     } else if (blockMoveBack) {
       writeFileSync(src, 'occupies the original name so the move back fails\n');
@@ -383,5 +385,85 @@ describe('Fix 3: outside-review recovery is isolated per save and per folder', (
     expect(r2.ws.t.outsideSaves[0]!.state).toBe('not_saved');
     expect(readdirSync(out1).filter((x) => x.startsWith('.tmp-'))).toEqual([]);
     r2.db.close();
+  });
+});
+
+describe('Round 4: a detected swap is never counted as published, whatever its content', () => {
+  it('a record swapped for a file with identical bytes: never adopted, even when recovery runs before an outcome is decided; quarantined after the unblock', async () => {
+    const hooks = new CrashHooks();
+    const s = setup(hooks);
+    const fs = s.ws.cloneOf(s.project.id) as RealCloneFs;
+    fs.swapHook = swapAt('1-draft.md', 'same-bytes', true);
+    hooks.arm('txn:finalizing:before'); // the app stops after the swap is recorded, before any outcome
+    const at = start(s.ws, s.task.id);
+    await waitFor(() => s.ws.crashedAt !== null);
+    s.db.close();
+    const dir = path.join(s.folder, attemptDir(s.task.id, at.id));
+    const r = relaunch(s.data, s.folder); // blocked: recovery reads, writes nothing
+    const row = r.ws.t.recordFiles.find((x) => x.attemptId === at.id && x.name === '1-draft.md')!;
+    expect(row).toMatchObject({ state: 'not_published', swap: 'not-moved-back' });
+    expect(r.ws.attempt(at.id).finalizing!.files.map((f) => f.name)).not.toContain('1-draft.md');
+    expect(existsSync(path.join(dir, '1-draft.md'))).toBe(true); // nothing moved while blocked
+    r.ws.liftSwapBlock(s.project.id);
+    r.db.close();
+    const r2 = relaunch(s.data, s.folder);
+    expect(existsSync(path.join(dir, '1-draft.md'))).toBe(false);
+    expect(readdirSync(path.join(dir, 'quarantine')).some((x) => x.startsWith('1-draft.md-'))).toBe(true);
+    expect(r2.ws.t.recordFiles.find((x) => x.attemptId === at.id && x.name === '1-draft.md')!.state).toBe('not_published');
+    expect(r2.ws.recordState(at.id)).toEqual({ kind: 'intact' });
+    r2.db.close();
+  });
+
+  it('final-status.json swapped for a file with identical bytes: not accepted while blocked; after the unblock it is quarantined and the stored bytes published', async () => {
+    const s = setup();
+    const fs = s.ws.cloneOf(s.project.id) as RealCloneFs;
+    fs.swapHook = swapAt('final-status.json', 'same-bytes', true);
+    const at = start(s.ws, s.task.id);
+    await s.ws.settled(at.id);
+    fs.swapHook = null;
+    const dir = path.join(s.folder, attemptDir(s.task.id, at.id));
+    expect(s.ws.attempt(at.id).state).toBe('complete'); // the outcome was decided before; it never changes
+    expect(s.ws.attempt(at.id).final).toBe(false);
+    expect(s.ws.project(s.project.id).swapBlock?.destinationName).toBe('final-status.json');
+    s.db.close();
+    const r = relaunch(s.data, s.folder);
+    expect(r.ws.attempt(at.id).final).toBe(false); // identical bytes at the name are not accepted
+    expect(r.ws.t.recordFiles.find((x) => x.attemptId === at.id && x.name === 'final-status.json')!.state).toBe('not_published');
+    r.ws.liftSwapBlock(s.project.id);
+    r.db.close();
+    const r2 = relaunch(s.data, s.folder);
+    const a = r2.ws.attempt(at.id);
+    expect(a.final).toBe(true);
+    expect(readFileSync(path.join(dir, 'final-status.json'), 'utf8')).toBe(a.finalizing!.finalStatusBytes);
+    expect(readdirSync(path.join(dir, 'quarantine')).some((x) => x.startsWith('final-status.json-'))).toBe(true);
+    expect(r2.ws.recordState(at.id)).toEqual({ kind: 'intact' });
+    r2.db.close();
+  });
+
+  it('an outside-review swap not moved back: the save stays not saved, and after the unblock the file at its name goes to quarantine', async () => {
+    for (const swapIn of ['file', 'same-bytes'] as const) {
+      const s = setup();
+      const fs = s.ws.cloneOf(s.project.id) as RealCloneFs;
+      const date = s.ws.now().slice(0, 10);
+      const name = `1-chatgpt-${date}.md`;
+      fs.swapHook = swapAt(name, swapIn, true);
+      expect(() => s.ws.saveOutsideReview({ taskId: s.task.id, source: 'chatgpt', text: 'Made-up review.' })).toThrow(/Not saved\. Check this folder/);
+      fs.swapHook = null;
+      const out = path.join(s.folder, 'app-records', s.task.id, 'outside');
+      expect(existsSync(path.join(out, name)), swapIn).toBe(true);
+      expect(s.ws.t.outsideSaves[0]).toMatchObject({ state: 'not_saved', swap: 'not-moved-back', swapTarget: name });
+      expect(new Service(s.ws).taskView(s.task.id).outsideReviews[0]!.note).toMatch(/could not be moved back/);
+      s.db.close();
+      const r = relaunch(s.data, s.folder);
+      expect(existsSync(path.join(out, name)), swapIn).toBe(true); // blocked: nothing moved
+      r.ws.liftSwapBlock(s.project.id);
+      r.db.close();
+      const r2 = relaunch(s.data, s.folder);
+      expect(existsSync(path.join(out, name)), swapIn).toBe(false);
+      expect(readdirSync(path.join(out, 'quarantine')).some((x) => x.startsWith(`${name}-`)), swapIn).toBe(true);
+      expect(r2.ws.t.outsideSaves[0]!.state).toBe('not_saved');
+      r2.ws.recover(); // repeatable: nothing left to move
+      r2.db.close();
+    }
   });
 });

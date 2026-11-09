@@ -703,7 +703,10 @@ export class Workspace {
     const fs = this.cloneOf(a.projectId);
     const dir = attemptDir(a.taskId, a.id);
     const existing = fs.hash(`${dir}/${FINAL_STATUS}`);
-    if (existing === a.finalizing.finalStatusHash) {
+    // A write of final-status.json that detected a swap: whatever is at the name now is not the
+    // app's file, even with identical bytes (plan revision 9: never counted as published).
+    const swapped = this.t.recordFiles.find((r) => r.attemptId === a.id && r.name === FINAL_STATUS)?.swap !== undefined;
+    if (existing === a.finalizing.finalStatusHash && !swapped) {
       this.db.transact('published:final-status.json', (d) => {
         const row = d.recordFiles.find((r) => r.attemptId === a.id && r.name === FINAL_STATUS);
         if (row) row.state = 'published';
@@ -1114,8 +1117,9 @@ export class Workspace {
     // A row recorded "not published" whose file is nevertheless at its final name with the planned
     // content: the move happened but its acknowledgement was lost. Adopt it before any outcome is
     // decided, so it is counted (and required). Different content there is someone else's: left alone.
+    // A write that detected a swap is never adopted, whatever the content (plan revision 9).
     if (!a.finalizing) {
-      for (const row of this.t.recordFiles.filter((r) => r.attemptId === a.id && r.state === 'not_published')) {
+      for (const row of this.t.recordFiles.filter((r) => r.attemptId === a.id && r.state === 'not_published' && r.swap === undefined)) {
         if (fs.hash(`${dir}/${row.name}`) === row.plannedHash) {
           this.db.transact(`recovery:adopted:${row.name}`, (d) => {
             const x = d.recordFiles.find((y) => y.attemptId === a.id && y.name === row.name)!;
@@ -1128,10 +1132,10 @@ export class Workspace {
     if (blocked) return;
     // A write that detected a swap and could not move the swapped-in entry back: whatever is at the
     // record name is not the app's record. A regular file there goes to quarantine; anything else is
-    // left in place and listed in the inventory. Never counted as published.
+    // left in place and listed in the inventory. Never counted as published, even if its bytes
+    // happen to equal the planned ones: the native check saw it is not the file the app wrote.
     for (const row of this.t.recordFiles.filter((r) => r.attemptId === a.id && r.state === 'not_published' && r.swap === 'not-moved-back')) {
-      const path = `${dir}/${row.name}`;
-      if (fs.entryKind(path) === 'file' && fs.hash(path) !== row.plannedHash) this.quarantine(fs, dir, row.name, row.writeId);
+      if (fs.entryKind(`${dir}/${row.name}`) === 'file') this.quarantine(fs, dir, row.name, row.writeId);
     }
     // Records already published: content that no longer matches its recorded hash is moved to
     // quarantine. The row stays "published", so the file stays required and the record state
@@ -1325,7 +1329,10 @@ export class Workspace {
             // Plan revision 9: nothing is saved from this write, and the project is blocked.
             const block = this.swapBlockFor(fs, dir, tmpName, target, e, 'outside-review', { taskId: task.id, attemptId: null });
             this.db.transact('outside:not-saved', (d) => {
-              d.outsideSaves.find((s) => s.saveId === saveId)!.state = 'not_saved';
+              const row = d.outsideSaves.find((s) => s.saveId === saveId)!;
+              row.state = 'not_saved';
+              row.swap = swapKind(e)!;
+              row.swapTarget = target;
               this.blockForSwap(d, task.projectId, block);
             });
             this.noteSwap(task.projectId, block);
@@ -1388,6 +1395,14 @@ export class Workspace {
     if (this.projectBlock(s.projectId)) return;
     const fs = this.cloneOf(s.projectId);
     const path = this.outsidePath(s);
+    if (s.state === 'not_saved' && s.swap === 'not-moved-back' && s.swapTarget) {
+      // A save that detected a swap and could not move the swapped-in entry back: whatever is at
+      // the review's name is not the pasted text. A regular file goes to outside/quarantine/, whatever
+      // its content; anything else is left in place and the inventory lists it. Repeatable.
+      const dir = `${taskDir(s.taskId)}/outside`;
+      if (fs.entryKind(`${dir}/${s.swapTarget}`) === 'file') this.quarantine(fs, dir, s.swapTarget, s.saveId);
+      return;
+    }
     const have = fs.hash(path);
     if (s.state === 'intended') {
       const next = have === s.textHash ? 'published' : 'not_saved';

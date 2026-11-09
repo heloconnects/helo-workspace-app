@@ -164,6 +164,10 @@ export interface OutsideSaveRow {
   number: number;
   state: 'intended' | 'published' | 'not_saved';
   damaged: string | null;
+  /** Set when this save detected a swap (plan revision 9). Absent in older stores and for ordinary failures. */
+  swap?: 'moved-back' | 'not-moved-back';
+  /** The outside-review name the swap happened at, so recovery can deal with what is left there. */
+  swapTarget?: string;
 }
 
 export interface Tables {

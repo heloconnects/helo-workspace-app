@@ -1,8 +1,8 @@
-SMOKE-PERSIST {"phase":"run","electron":"44.9.3","attemptA":"a-105dfe8c72310472","stateA":"complete","attemptB":"a-a3bef3fafd2877ef","stateB":"reviewing","filesA":["1-draft-sent.json","1-draft.md","2-review-sent.json","2-review.md","3-synthesis-sent.json","3-synthesis.md","final-status.json","packet.md","sharing-plan.json"]}
+SMOKE-PERSIST {"phase":"run","electron":"44.9.3","attemptA":"a-ac8db8bf42b91c1e","stateA":"complete","attemptB":"a-b2f46069ca36b0af","stateB":"reviewing","filesA":["1-draft-sent.json","1-draft.md","2-review-sent.json","2-review.md","3-synthesis-sent.json","3-synthesis.md","final-status.json","packet.md","sharing-plan.json"]}
   ok: launch 1: attempt A completed
   ok: launch 1: attempt A has nine record files
   ok: launch 1: quit while attempt B was reviewing
-SMOKE-PERSIST {"phase":"verify","electron":"44.9.3","page":{"banner":true,"persistentNote":true,"projectRows":1},"projects":1,"tasks":2,"attempts":[{"id":"a-105dfe8c72310472","state":"complete","final":true,"record":"intact","unresolved":[]},{"id":"a-a3bef3fafd2877ef","state":"interrupted","final":true,"record":"intact","unresolved":["review"]}]}
+SMOKE-PERSIST {"phase":"verify","electron":"44.9.3","page":{"banner":true,"persistentNote":true,"projectRows":1},"projects":1,"tasks":2,"attempts":[{"id":"a-ac8db8bf42b91c1e","state":"complete","final":true,"record":"intact","unresolved":[]},{"id":"a-b2f46069ca36b0af","state":"interrupted","final":true,"record":"intact","unresolved":["review"]}]}
   ok: launch 2: project and both tasks survived the relaunch
   ok: launch 2: attempt A still complete, record intact
   ok: launch 2: attempt B interrupted by start-up recovery, record intact

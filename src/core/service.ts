@@ -225,7 +225,13 @@ export class Service implements HeloApi {
           state: s.damaged ? 'damaged' : s.state,
           path: s.state === 'published' ? ws.outsidePath(s) : null,
           text: s.state === 'published' ? s.content : null,
-          note: s.damaged ?? (s.state === 'not_saved' ? 'Not saved. Paste it again.' : null),
+          note:
+            s.damaged ??
+            (s.swap
+              ? `Not saved: something replaced the file while it was being saved (${s.swap === 'moved-back' ? 'the swapped-in entry was moved back' : `the swapped-in entry could not be moved back from ${s.swapTarget}; a regular file there goes to quarantine once the folder is checked`}). Paste it again after checking the folder.`
+              : s.state === 'not_saved'
+                ? 'Not saved. Paste it again.'
+                : null),
         })),
       canStartAttempt: block === null,
       startBlockedReason: block,
